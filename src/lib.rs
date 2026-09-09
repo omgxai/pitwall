@@ -6,11 +6,13 @@
 
 pub mod agents;
 pub mod collector;
+pub mod context;
 pub mod ids;
 pub mod output;
 pub mod platform;
 pub mod resume;
 pub mod store;
+pub mod summary;
 
 /// Crate version string, kept in sync with `Cargo.toml`.
 pub fn version() -> &'static str {

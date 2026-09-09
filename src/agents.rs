@@ -97,7 +97,7 @@ pub fn path_dirs() -> Vec<PathBuf> {
     std::env::var_os("PATH").map_or(Vec::new(), |paths| std::env::split_paths(&paths).collect())
 }
 
-fn find_binary(dirs: &[PathBuf], binary: &str) -> Option<PathBuf> {
+pub(crate) fn find_binary(dirs: &[PathBuf], binary: &str) -> Option<PathBuf> {
     dirs.iter()
         .map(|d| d.join(binary))
         .find(|p| is_executable_file(p))

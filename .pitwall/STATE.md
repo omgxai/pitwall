@@ -237,9 +237,52 @@
 - Hermetic discovery tests (temp dirs, no PATH mutation).
 - Live: agents/models/status verified against real tools (above).
 
+## Completed work (M5c)
+
+- [x] Platform: `process_io` (/proc/PID/io) + `terminal_text` (kitty
+  socket best-effort w/ 2s timeout + thread-drained pipe; foot/exotic →
+  explicit Unavailable; pty reads banned).
+- [x] Context builder: allowlisted fields only, 10+10 lines, 4KB/window,
+  6 sessions (terminal-first), 16KB cap + honest truncation count.
+- [x] Scrub: secret-shape matrix (incl. PEM/Bearer/bare forms w/ shape
+  heuristic preserving plain words), control stripping, canary tests.
+- [x] Ephemeral lifecycle: /run/user/$UID/pitwall 0700, O_EXCL 0600
+  unpredictable names (/dev/urandom), RAII Drop + explicit close;
+  cleanup verified on success/failure/timeout/drop paths.
+- [x] Derived events (M5b gap-fill): read-time diff over retained
+  observation + checkpoints_since; no new tables.
+- [x] `pitwall summarize [--agent --model --dir --timeout --dry-run]`:
+  fixed argv (`opencode run --format json -m -f`), model validation,
+  timeout+kill, JSON-event text extraction (tool payloads ignored),
+  exit 0/1/2 contract. Live run on free-tier model returned an honest,
+  evidence-graded summary; agent modified nothing; no residue/strays.
+- [x] Kitty live validation: PENDING (no kitty session available;
+  fixture-tested degradation only).
+
+## Remaining work (next)
+
+- M5d+ (summary cache/state.json/panel/identity) or release packaging.
+  Awaiting instruction. Do NOT start unapproved scope.
+
+## Known problems / limits (M5c)
+
+- Foot terminal text unobservable by design (honest marker, not error).
+- Kitty path implemented but not live-validated (no kitty running).
+- Live agent summary spends user agent budget (used free-tier model
+  for the single smoke test); auto-generation stays banned.
+- Full `cargo test` takes ~30s (retention/prune volume + timeout test).
+
+## Tests performed (M5c, 2026-09-09)
+
+- `cargo fmt --check` clean; `cargo test` 88 passed; clippy
+  (--all-targets --all-features) clean.
+- Live: dry-run context (roles/io/events/unavailable markers),
+  agent summary rc=0 with graded uncertainty, ctx cleanup, schema
+  unchanged (4 tables), secret scan clean.
+
 ## Exact next step
 
-- Commit + push M5a, then begin M5b (derived events).
+- Commit + push M5c, then STOP (no M5d without instruction).
 
 ## Completed work (M0 archive)
 

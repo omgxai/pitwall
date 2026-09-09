@@ -71,3 +71,18 @@ Refusals (malformed id, unknown session, missing/non-dir path, launch
 failure) exit non-zero with a reason and never fall back to another
 target. There is no agent-start path and no arbitrary-command path;
 checkpoint notes are length-capped labels, never interpreted.
+
+## M5c ephemeral terminal context
+
+Terminal first/last lines sampled for AI summaries are EPHEMERAL, never
+history: they exist only inside one bounded JSON document under
+`/run/user/$UID/pitwall/` (0700 dir, O_EXCL 0600 unpredictable file),
+are scrubbed before writing (secret-shape matrix incl. PEM/Bearer/bare
+forms; structural bans on env/argv/transcripts hold first), travel to
+the agent only via `-f` file attachment (never argv, never shell), and
+are unlinked on every exit path (explicit close + Drop guard; tmpfs
+backing). SQLite/state.json/logs never receive terminal text (only the
+returned interpretation may later be cached per M5 design, never the
+evidence). The agent is invoked with fixed argv and a static
+interpret-only instruction; tool-call payloads in its output are
+ignored, never chained.

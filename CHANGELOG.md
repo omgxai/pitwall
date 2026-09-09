@@ -7,6 +7,12 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M5c ephemeral AI context: `/proc` IO signals, best-effort kitty text
+  with honest foot Unavailable, bounded context builder (10+10 lines,
+  4KB/window, 6 sessions, 16KB cap), secret scrubbing, RAII ephemeral
+  files under /run/user, read-time derived events (no new tables),
+  `pitwall summarize` via configured agent (fixed argv, timeout, text
+  extraction). No OpenRouter/keys/cloud; no schema changes.
 - M5a evidence + discovery: `/proc` exe basename signal, window roles
   (terminal/app/unknown; no agent inference for apps), honest Unknown
   (`terminal context only`), additive `role` in JSON outputs,

@@ -37,6 +37,9 @@ fn print_help() {
     println!("                     --session-id ID [--data-dir DIR]");
     println!("    agents           List supported AI agents and detection status");
     println!("    models           List models for an agent (--agent ID, default opencode)");
+    println!("    summarize        Ask the configured agent for a workspace summary");
+    println!("                     [--agent ID] [--model P/M] [--dir DIR]");
+    println!("                     [--timeout SECS] [--dry-run] [--data-dir DIR]");
 }
 
 #[cfg(target_os = "linux")]
@@ -351,6 +354,188 @@ fn cmd_models(args: &[String]) -> ExitCode {
     }
 }
 
+/// Explicit user-triggered workspace summary (M5c). Builds the ephemeral
+/// context, optionally prints it (--dry-run), otherwise invokes the
+/// configured agent once and prints the extracted text. Cleanup on every
+/// path; never persists terminal content.
+fn cmd_summarize(args: &[String]) -> ExitCode {
+    use pitwall_lib::summary as summary_mod;
+
+    let mut agent = "opencode".to_string();
+    let mut model: Option<String> = None;
+    let mut dir_override: Option<String> = None;
+    let mut timeout_secs = summary_mod::DEFAULT_TIMEOUT_SECS;
+    let mut dry_run = false;
+    let mut data_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--agent" => {
+                i += 1;
+                if let Some(a) = args.get(i) {
+                    agent = a.clone();
+                }
+            }
+            "--model" => {
+                i += 1;
+                model = args.get(i).cloned();
+            }
+            "--dir" => {
+                i += 1;
+                dir_override = args.get(i).cloned();
+            }
+            "--timeout" => {
+                i += 1;
+                match args.get(i).and_then(|v| v.parse::<u64>().ok()) {
+                    Some(t) if (5..=600).contains(&t) => timeout_secs = t,
+                    _ => {
+                        eprintln!("pitwall summarize: --timeout must be 5..600 seconds");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--dry-run" => dry_run = true,
+            "--data-dir" => {
+                i += 1;
+                data_dir = args.get(i).map(PathBuf::from);
+            }
+            other => {
+                eprintln!("pitwall summarize: unknown option '{other}'.");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+
+    let plat = platform();
+    let snapshot = collector::collect(&plat);
+
+    // Previous observation + recent checkpoints feed the derived events.
+    // Degradable: an unavailable store yields an event-free context.
+    let (prev_sessions, recent_checkpoints) = (|| {
+        let dir = data_dir.clone().unwrap_or_else(store::default_data_dir);
+        let db = dir.join(store::DB_FILENAME);
+        let store = store::Store::open(&db).ok()?;
+        let (obs_id, collected_at) = store.latest_observation().ok()??;
+        let prev = store.observation_sessions(obs_id).ok()?;
+        let cps = store.checkpoints_since(collected_at, 20).ok()?;
+        Some((prev, cps))
+    })()
+    .unwrap_or((Vec::new(), Vec::new()));
+    let events =
+        pitwall_lib::context::derive_events(&prev_sessions, &snapshot, &recent_checkpoints, 20);
+
+    // Latest checkpoint per project for context (bounded, newest 10).
+    let mut seen_projects = std::collections::HashSet::new();
+    let mut checkpoints: Vec<store::Checkpoint> = Vec::new();
+    {
+        let dir = data_dir.clone().unwrap_or_else(store::default_data_dir);
+        let db = dir.join(store::DB_FILENAME);
+        if let Ok(store) = store::Store::open(&db) {
+            if let Ok(all) = store.latest_checkpoints(50) {
+                for cp in all {
+                    if seen_projects.insert(cp.project_id.clone()) {
+                        checkpoints.push(cp);
+                    }
+                    if checkpoints.len() >= 10 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let (document, truncated) =
+        pitwall_lib::context::build_context(&plat, &snapshot, &events, &checkpoints);
+    if truncated > 0 {
+        eprintln!("pitwall summarize: note: {truncated} session(s) omitted from context");
+    }
+    let mut ctx = match pitwall_lib::context::EphemeralContext::create(&document) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("pitwall summarize: cannot stage context ({e})");
+            return ExitCode::from(1);
+        }
+    };
+    if dry_run {
+        println!("{document}");
+        ctx.close();
+        return ExitCode::SUCCESS;
+    }
+
+    // Working directory for the agent: explicit override, else the most
+    // recent terminal project, else the current directory. Validated.
+    let run_dir = match dir_override {
+        Some(d) => d,
+        None => snapshot
+            .sessions
+            .iter()
+            .filter(|s| s.project.is_some())
+            .max_by_key(|s| s.last_activity_epoch)
+            .and_then(|s| s.project.as_ref().map(|p| p.dir.clone()))
+            .unwrap_or_else(|| std::env::var("PWD").unwrap_or_else(|_| "/tmp".to_string())),
+    };
+    if !run_dir.starts_with('/') {
+        eprintln!("pitwall summarize: refusing non-absolute directory");
+        ctx.close();
+        return ExitCode::from(2);
+    }
+    if !std::fs::metadata(&run_dir)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
+        eprintln!("pitwall summarize: directory unavailable: {run_dir}");
+        ctx.close();
+        return ExitCode::from(1);
+    }
+    let opencode_bin = match pitwall_lib::agents::path_dirs()
+        .iter()
+        .map(|d| d.join("opencode"))
+        .find(|p| p.is_file())
+    {
+        Some(p) => p,
+        None => {
+            eprintln!("pitwall summarize: opencode binary not found on PATH");
+            ctx.close();
+            return ExitCode::from(1);
+        }
+    };
+    let ctx_path = match ctx.path() {
+        Some(p) => p.to_path_buf(),
+        None => {
+            eprintln!("pitwall summarize: context has no path");
+            return ExitCode::from(1);
+        }
+    };
+    let argv =
+        match summary_mod::build_argv(&agent, model.as_deref(), &run_dir, &ctx_path, &opencode_bin)
+        {
+            Ok(argv) => argv,
+            Err(e) => {
+                eprintln!("pitwall summarize: {e}");
+                ctx.close();
+                return ExitCode::from(1);
+            }
+        };
+    match summary_mod::run_agent(&argv, std::time::Duration::from_secs(timeout_secs)) {
+        Ok(raw) => {
+            let text = summary_mod::extract_summary_text(&raw);
+            ctx.close();
+            if text.is_empty() {
+                eprintln!("pitwall summarize: agent returned no usable text");
+                return ExitCode::from(1);
+            }
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("pitwall summarize: {e}");
+            ctx.close();
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -383,6 +568,7 @@ fn main() -> ExitCode {
         Some("resume") => cmd_resume(&args[1..]),
         Some("agents") => cmd_agents(),
         Some("models") => cmd_models(&args[1..]),
+        Some("summarize") => cmd_summarize(&args[1..]),
         Some(other) => {
             eprintln!("pitwall: unknown subcommand '{other}'. Run `pitwall --help`.");
             ExitCode::from(2)

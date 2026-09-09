@@ -11,8 +11,9 @@
 //!   working-tree cleanliness;
 //! - `/proc/sys/kernel/hostname` for the host name.
 
-use super::{GitInfo, Platform, RawProcess, WindowInfo};
+use super::{GitInfo, IoCounters, Platform, RawProcess, TerminalText, WindowInfo};
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 /// Upper bound on stored command length (chars). Bounds snapshot size and
@@ -218,6 +219,134 @@ impl Platform for LinuxPlatform {
             Err("focus dispatch rejected (window likely gone)".to_string())
         }
     }
+
+    fn process_io(&self, pid: u32) -> Option<IoCounters> {
+        let content = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+        let mut read_bytes = None;
+        let mut write_bytes = None;
+        for line in content.lines() {
+            let (key, value) = line.split_once(':')?;
+            let number: u64 = value.trim().parse().ok()?;
+            match key {
+                "read_bytes" => read_bytes = Some(number),
+                "write_bytes" => write_bytes = Some(number),
+                _ => {}
+            }
+        }
+        Some(IoCounters {
+            read_bytes: read_bytes?,
+            write_bytes: write_bytes?,
+        })
+    }
+
+    fn terminal_text(&self, pid: u32, class: &str) -> TerminalText {
+        // Best-effort kitty path only: per-PID socket + `kitten` binary,
+        // numeric-PID-derived path, bounded read with timeout. Everything
+        // else — foot has no scrollback API, pty reads are destructive —
+        // degrades to Unavailable. Never attempted invasively.
+        if class.trim().to_lowercase() != "kitty" {
+            return TerminalText::Unavailable {
+                reason: "no scrollback API",
+            };
+        }
+        kitty_text(pid)
+    }
+}
+
+/// Read bounded terminal text via kitty's control socket. Returns
+/// `Unavailable` on any failure (no binary, no socket, timeout, parse).
+/// Separated for unit testing of the degradation contract.
+fn kitty_text(pid: u32) -> TerminalText {
+    const TIMEOUT_MS: u64 = 2000;
+    const MAX_BYTES: usize = 4096;
+    // `kitten` must exist; socket path derives from the numeric PID only.
+    let socket = match std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        Some(runtime) => runtime.join(format!("omarchy-kitty-{pid}")),
+        None => {
+            return TerminalText::Unavailable {
+                reason: "no runtime dir",
+            };
+        }
+    };
+    if !socket.exists() {
+        return TerminalText::Unavailable {
+            reason: "no kitty socket",
+        };
+    }
+    let mut child = match Command::new("kitten")
+        .args([
+            "@",
+            "--to",
+            &format!("unix:{}", socket.display()),
+            "get-text",
+            "--extent",
+            "all",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return TerminalText::Unavailable {
+                reason: "kitten unavailable",
+            };
+        }
+    };
+    // Drain stdout on a helper thread (bounded): a large scrollback must
+    // never fill the pipe and deadlock the child while we poll for exit.
+    let stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        if let Some(out) = stdout {
+            let _ = out.take((MAX_BYTES * 4) as u64).read_to_end(&mut buf);
+        }
+        buf
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(TIMEOUT_MS);
+    let exit_ok = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return TerminalText::Unavailable {
+                        reason: "get-text timeout",
+                    };
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return TerminalText::Unavailable {
+                    reason: "get-text failed",
+                };
+            }
+        }
+    };
+    let raw = reader.join().unwrap_or_default();
+    if !exit_ok {
+        return TerminalText::Unavailable {
+            reason: "get-text failed",
+        };
+    }
+    let text = String::from_utf8_lossy(&raw);
+    let capped: String = text.chars().take(MAX_BYTES).collect();
+    let lines: Vec<String> = capped
+        .lines()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.trim().is_empty())
+        .take(21)
+        .map(str::to_string)
+        .collect();
+    let (first, last) = crate::context::window_lines(&lines);
+    TerminalText::Lines { first, last }
 }
 
 /// Compositor window address shape (`0x` + hex). Shared by focus validation

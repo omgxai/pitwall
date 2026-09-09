@@ -800,6 +800,76 @@ impl Store {
             .ok();
         Ok(row)
     }
+}
+
+/// Previous-observation session facts for read-time event derivation.
+/// Shape mirrors the sessions table; mapping to display events lives in
+/// the context module (no new tables by design).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrevSession {
+    pub session_id: String,
+    pub project_id: Option<String>,
+    pub project_dir: Option<String>,
+    pub agent_kind: String,
+    pub branch: Option<String>,
+    pub git_clean: Option<bool>,
+    pub state: String,
+}
+
+impl Store {
+    /// Newest retained observation `(id, collected_at)`, if any.
+    pub fn latest_observation(&self) -> Result<Option<(i64, i64)>, StoreError> {
+        let row: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT id, collected_at FROM observations ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        Ok(row)
+    }
+
+    /// Session facts for one observation (event derivation input).
+    pub fn observation_sessions(
+        &self,
+        observation_id: i64,
+    ) -> Result<Vec<PrevSession>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session_id, project_id, project_dir, agent_kind, branch,
+                        git_clean, state FROM sessions WHERE observation_id = ?1",
+            )
+            .map_err(StoreError::from)?;
+        let rows = stmt
+            .query_map(rusqlite::params![observation_id], |row| {
+                Ok(PrevSession {
+                    session_id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    project_dir: row.get(2)?,
+                    agent_kind: row.get(3)?,
+                    branch: row.get(4)?,
+                    git_clean: row.get::<_, Option<i64>>(5)?.map(|v| v != 0),
+                    state: row.get(6)?,
+                })
+            })
+            .map_err(StoreError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?;
+        Ok(rows)
+    }
+
+    /// Checkpoints created after `since_epoch` (event derivation input).
+    pub fn checkpoints_since(
+        &self,
+        since_epoch: i64,
+        limit: i64,
+    ) -> Result<Vec<Checkpoint>, StoreError> {
+        let mut all = self.latest_checkpoints(limit)?;
+        all.retain(|cp| cp.created_at > since_epoch);
+        Ok(all)
+    }
 
     /// Bounded retention: newest N per project + hard global cap.
     fn enforce_checkpoint_retention(&self) -> Result<(), StoreError> {

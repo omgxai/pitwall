@@ -166,6 +166,14 @@ mod tests {
             self.focused.borrow_mut().push(address.to_string());
             Ok(())
         }
+        fn process_io(&self, _pid: u32) -> Option<crate::platform::IoCounters> {
+            None
+        }
+        fn terminal_text(&self, _pid: u32, _class: &str) -> crate::platform::TerminalText {
+            crate::platform::TerminalText::Unavailable {
+                reason: "mock has no terminals",
+            }
+        }
     }
 
     // NOTE: collect() derives session ids from project/window/pid, so live

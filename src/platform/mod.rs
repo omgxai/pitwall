@@ -77,4 +77,34 @@ pub trait Platform {
     /// Focus a compositor window by its validated address (`0x…` hex).
     /// Best-effort: fails cleanly when the window is gone.
     fn focus_window_address(&self, address: &str) -> Result<(), String>;
+    /// Byte counters from `/proc/PID/io` (read/write activity evidence).
+    /// Read-only; `None` when unreadable. Never persisted by the core.
+    fn process_io(&self, pid: u32) -> Option<IoCounters>;
+    /// Bounded terminal text for one window's root PID. Best-effort and
+    /// honest: terminals without a safe scrollback API (e.g. foot) return
+    /// `TerminalText::Unavailable` — never attempted invasively.
+    fn terminal_text(&self, pid: u32, class: &str) -> TerminalText;
+}
+
+/// Cumulative byte counters (Linux `/proc/PID/io` subset). Absolute values
+/// are activity evidence ("has done I/O"); only in-memory deltas across two
+/// close reads may suggest current liveness. Never semantic claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IoCounters {
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+}
+
+/// Terminal text sampling outcome. `Lines` carries at most the first and
+/// last 10 non-empty lines within a hard byte cap; `Unavailable` names the
+/// reason so consumers (and the AI) know observation was impossible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalText {
+    Lines {
+        first: Vec<String>,
+        last: Vec<String>,
+    },
+    Unavailable {
+        reason: &'static str,
+    },
 }
