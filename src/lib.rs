@@ -8,6 +8,7 @@ pub mod collector;
 pub mod ids;
 pub mod output;
 pub mod platform;
+pub mod resume;
 pub mod store;
 
 /// Crate version string, kept in sync with `Cargo.toml`.

@@ -25,6 +25,8 @@ Item {
 
   readonly property var sessions: (record && Array.isArray(record.sessions)) ? record.sessions : []
   readonly property int sessionCount: sessions.length
+  // v2 additive key; absent on v1 (panel tolerates both).
+  readonly property var resumable: (record && Array.isArray(record.resumable)) ? record.resumable : []
   readonly property double collectedAt: record ? Number(record.collected_at || 0) : 0
 
   // Primary session = most recently active. Stable choice: ties keep array
@@ -103,8 +105,9 @@ Item {
   function parse(content) {
     try {
       var parsed = JSON.parse(String(content || ""))
+      var version = Number(parsed && parsed.state_version)
       var ok = parsed && typeof parsed === "object"
-        && Number(parsed.state_version) === 1
+        && (version === 1 || version === 2)
         && Array.isArray(parsed.sessions)
       if (!ok) throw new Error("unsupported state shape")
       root.record = parsed

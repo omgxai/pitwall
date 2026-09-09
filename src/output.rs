@@ -5,6 +5,7 @@
 //! explicit `null` (never omitted) for unknown values.
 
 use crate::collector::WorkspaceSnapshot;
+use crate::store::Checkpoint;
 
 /// Escape a string for JSON double-quote embedding.
 pub fn escape(s: &str) -> String {
@@ -150,17 +151,39 @@ pub fn snapshot_to_text(s: &WorkspaceSnapshot) -> String {
 // generated from the same [`WorkspaceSnapshot`], but neither is derived
 // from the other's bytes: the panel must never depend on CLI formatting.
 //
-// state.json contract (state_version 1):
-// - top level: state_version, collected_at, hostname, session_count, sessions
-// - per session: id, state, process_count, project{id,dir,name,is_git_repo,
-//   branch,git_clean}|null, agent{kind,confidence}, window{address,class,
-//   title,workspace}|null, last_activity{epoch,kind}, summary
-// - NEVER included: per-process command lines, agent evidence strings,
-//   or anything beyond the fields above (see SECURITY.md boundary).
-pub const STATE_SCHEMA_VERSION: u32 = 1;
+// state.json contract (state_version 2):
+// - everything v1 had, byte-identical in shape (v1 readers ignore `resumable`)
+// - plus `resumable`: newest-first checkpoints for vanished sessions
+//   (cap RESUMABLE_CAP), each scrubbed like the rest: checkpoint_id,
+//   session_id (opaque local id, needed for resume-by-id), project_id,
+//   project_dir, project_name (basename), branch, git_clean,
+//   agent_kind, state (normalized), last_activity_epoch, created_at,
+//   note, trigger. No PIDs, cmdlines, evidence, or secrets.
+pub const STATE_SCHEMA_VERSION: u32 = 2;
 
-/// Render a snapshot as the `state.json` artifact (state schema v1).
-pub fn snapshot_to_state_json(s: &WorkspaceSnapshot) -> String {
+/// Cap on exposed resumable entries (panel shows a compact list, not history).
+pub const RESUMABLE_CAP: usize = 10;
+
+/// Normalize a stored state string to the known session-state vocabulary;
+/// corrupt/foreign values become "unknown" rather than breaking readers.
+pub fn normalize_state(state: &str) -> &'static str {
+    match state {
+        "running" => "running",
+        "sleeping" => "sleeping",
+        "stopped" => "stopped",
+        _ => "unknown",
+    }
+}
+
+fn project_basename(dir: &str) -> &str {
+    dir.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(dir)
+}
+
+/// Render a snapshot as the `state.json` artifact (state schema v2).
+pub fn snapshot_to_state_json(s: &WorkspaceSnapshot, resumable: &[Checkpoint]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "{{\"state_version\":{},\"collected_at\":{},\"hostname\":{},\"session_count\":{},\"sessions\":[",
@@ -205,6 +228,28 @@ pub fn snapshot_to_state_json(s: &WorkspaceSnapshot) -> String {
             sess.last_activity_epoch,
             q(sess.last_activity_kind),
             q(&sess.summary)
+        ));
+    }
+    out.push_str("],\"resumable\":[");
+    for (i, cp) in resumable.iter().take(RESUMABLE_CAP).enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"checkpoint_id\":{},\"session_id\":{},\"project_id\":{},\"project_dir\":{},\"project_name\":{},\"branch\":{},\"git_clean\":{},\"agent_kind\":{},\"state\":{},\"last_activity_epoch\":{},\"created_at\":{},\"note\":{},\"trigger\":{}}}",
+            cp.id,
+            q(&cp.session_id),
+            q(&cp.project_id),
+            q(&cp.project_dir),
+            q(project_basename(&cp.project_dir)),
+            opt_q(cp.branch.as_deref()),
+            opt_bool(cp.git_clean),
+            q(&cp.agent_kind),
+            q(normalize_state(&cp.state)),
+            cp.last_activity_epoch,
+            cp.created_at,
+            opt_q(cp.note.as_deref()),
+            q(&cp.trigger)
         ));
     }
     out.push_str("]}");
@@ -290,9 +335,10 @@ mod tests {
         let mut snap = sample_snapshot();
         snap.sessions[0].processes[0].command = "opencode --token hunter2-supersecret".to_string();
         snap.sessions[0].agent.evidence = vec!["cmd:opencode (pid 10)".to_string()];
-        let state = snapshot_to_state_json(&snap);
-        assert!(state.starts_with("{\"state_version\":1"), "{state}");
+        let state = snapshot_to_state_json(&snap, &[]);
+        assert!(state.starts_with("{\"state_version\":2"), "{state}");
         assert!(state.contains("\"summary\":"), "{state}");
+        assert!(state.contains("\"resumable\":[]"), "{state}");
         assert!(
             !state.contains("hunter2-supersecret"),
             "cmdline leaked: {state}"
@@ -307,5 +353,66 @@ mod tests {
             "process detail excluded: {state}"
         );
         assert!(!state.contains("\"pid\""), "pids excluded: {state}");
+    }
+
+    fn sample_checkpoint(id: i64, session: &str) -> Checkpoint {
+        Checkpoint {
+            id,
+            created_at: 1_700_000_200 + id,
+            project_id: "proj_def".to_string(),
+            session_id: session.to_string(),
+            project_dir: "/home/u/Work".to_string(),
+            branch: Some("main".to_string()),
+            git_clean: Some(false),
+            agent_kind: "opencode".to_string(),
+            agent_confidence: "high".to_string(),
+            state: "stopped".to_string(),
+            last_activity_epoch: 1_700_000_001,
+            window_address: Some("0x1".to_string()),
+            window_class: Some("foot".to_string()),
+            note: Some("halfway through auth".to_string()),
+            trigger: "disappearance".to_string(),
+            observation_id: Some(7),
+        }
+    }
+
+    #[test]
+    fn state_v2_preserves_v1_shape_and_adds_resumable() {
+        let snap = sample_snapshot();
+        let cps = vec![
+            sample_checkpoint(2, "sess_old"),
+            sample_checkpoint(1, "sess_older"),
+        ];
+        let state = snapshot_to_state_json(&snap, &cps);
+        // v1 shape intact (newest-first resumable is purely additive).
+        assert!(state.contains("\"hostname\":\"test\\\"box\""), "{state}");
+        assert!(state.contains("\"sessions\":[{"), "{state}");
+        let rpos = state.find("\"resumable\":[").expect("resumable key");
+        let body = &state[rpos..];
+        assert!(
+            body.find("\"checkpoint_id\":2").unwrap() < body.find("\"checkpoint_id\":1").unwrap()
+        );
+        assert!(body.contains("\"project_name\":\"Work\""), "{body}");
+        assert!(body.contains("\"session_id\":\"sess_old\""), "{body}");
+        assert!(body.contains("\"note\":\"halfway through auth\""), "{body}");
+        assert!(!body.contains("\"pid\""), "{body}");
+        assert!(!body.contains("evidence"), "{body}");
+    }
+
+    #[test]
+    fn state_v2_caps_and_normalizes_resumable() {
+        let snap = sample_snapshot();
+        let mut cps = Vec::new();
+        for i in 0..(RESUMABLE_CAP + 5) {
+            let mut cp = sample_checkpoint(i as i64, &format!("sess_{i}"));
+            cp.state = "flying".to_string(); // corrupt/foreign state
+            cps.push(cp);
+        }
+        let state = snapshot_to_state_json(&snap, &cps);
+        let rpos = state.find("\"resumable\":[").unwrap();
+        let body = &state[rpos..];
+        assert_eq!(body.matches("\"checkpoint_id\"").count(), RESUMABLE_CAP);
+        assert!(!body.contains("\"flying\""), "foreign states normalized");
+        assert!(body.contains("\"state\":\"unknown\""), "{body}");
     }
 }

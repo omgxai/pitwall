@@ -8,8 +8,8 @@
 - **M0 — Repository foundation**: COMPLETE, pushed (`62fdfdb`).
 - **M1 — Workspace/process discovery**: COMPLETE, pushed (`7f5ec34`).
 - **M2 — Local state**: COMPLETE, pushed (`5511eaa`).
-- **M3 — Omarchy panel prototype**: COMPLETE, pushed (`5a591d5`).
-- **M3 visual polish**: COMPLETE (pending commit/push below).
+- **M3 — Omarchy panel prototype**: COMPLETE, pushed (`5a591d5` + polish `751c7d6`).
+- **M4 — Checkpoints + Resume**: COMPLETE (pending commit/push below).
 
 ## Completed work
 
@@ -162,9 +162,53 @@
 - Rust gate unchanged-green: fmt clean, 38 passed, clippy clean.
 - Shell reload clean; QML error sweep clean; secret scan clean.
 
+## Completed work (M4)
+
+- [x] M4a: severity-ordered `derive_session_state` (Stopped > Running >
+  Sleeping > Unknown, order-independent) + order/permutation tests.
+- [x] `checkpoints` table (schema v2, no FKs, indexes on project/session);
+  v1 cache recreated on open (pre-release, documented).
+- [x] Triggers: `pitwall checkpoint [--note --session-id]` (manual) +
+  disappearance during `snapshot` (one per continuous absence, re-fires
+  after reappearance). Retention 25/project + 500 global. Note cap 280.
+- [x] Identity docs: sess_* = terminal context (B), not agent run (C) or
+  human task (D).
+- [x] M4b: `pitwall resume --session-id` (L1 focus via Lua dispatch, L2
+  terminal via `xdg-terminal-exec --dir`; strict validation, no fallback,
+  never starts agents). `Platform::{launch_terminal, focus_window_address}`.
+- [x] state.json v2 (additive `resumable`, cap 10, scrubbed, incl.
+  session_id correction). Reader accepts v1|v2.
+- [x] M4c: RESUME section + ResumableRow + resume-via-`pitwall` Process;
+  hero tooltip "Resume: focus terminal". M3 README dispatch wording fixed.
+- [x] Dev finding: shell hot-reload reuses same-URL components — QML
+  content edits need `omarchy-restart-shell` (lock-guarded). Documented
+  in plugin README.
+
+## Remaining work (next)
+
+- M5 (not yet defined — OpenRouter summaries per roadmap) or release
+  packaging. Awaiting instruction.
+
+## Known problems / limits (M4)
+
+- Physical panel-button click not performed headlessly (no input tool);
+  click wiring reviewed, CLI focus path proven live. Recommend one manual
+  click when convenient.
+- 6+ sessions and vertical-bar mode untested live (max 3 sessions seen).
+- Session-state pid-ordering fixed; severity model documented.
+
+## Tests performed (M4, 2026-09-09)
+
+- `cargo fmt --check` clean; `cargo test` 62 passed; clippy clean.
+- Live: manual checkpoint; disappearance + suppression + refire;
+  L1 focus (activewindow verified); L2 terminal-at-dir (plain foot, no
+  agent); malformed/unknown/missing-dir refusals (rc 2/1/1, no fallback);
+  state v2 + resumable rendered in panel; screenshots inspected.
+- Secret scan — clean (results at commit time).
+
 ## Exact next step
 
-- Commit + push M3 polish, then await instruction to begin M4.
+- Commit + push M4, then await instruction (M5 or release).
 
 ## Completed work (M0 archive)
 

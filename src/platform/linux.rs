@@ -167,6 +167,60 @@ impl Platform for LinuxPlatform {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "unknown".to_string())
     }
+
+    fn launch_terminal(&self, directory: &str) -> Result<(), String> {
+        // Fixed argv, no shell, detached. `xdg-terminal-exec` resolves the
+        // user's default terminal; `--dir` maps to `--working-directory`.
+        // Validation (absolute, exists, is-dir) happens upstream in resume;
+        // this layer only refuses the empty string as defense in depth.
+        if directory.is_empty() {
+            return Err("refusing to launch a terminal with no directory".to_string());
+        }
+        Command::new("xdg-terminal-exec")
+            .args(["--dir", directory])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("terminal launch failed: {e}"))
+    }
+
+    fn focus_window_address(&self, address: &str) -> Result<(), String> {
+        // Same Lua dispatch shape as first-party `omarchy-hyprland-focus-app`
+        // (the bare multi-token form is broken in this hyprctl build).
+        // Argv-based, no shell; the address is regex-validated upstream.
+        if !is_hex_address(address) {
+            return Err(format!(
+                "refusing to focus invalid window address {address:?}"
+            ));
+        }
+        let lua = format!("hl.dsp.focus({{ window = \"address:{address}\" }})");
+        let status = Command::new("hyprctl")
+            .args(["dispatch", &lua])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("focus dispatch failed to spawn: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("focus dispatch rejected (window likely gone)".to_string())
+        }
+    }
+}
+
+/// Compositor window address shape (`0x` + hex). Shared by focus validation
+/// and resume; intentionally strict — nothing else may flow into dispatch.
+pub fn is_hex_address(address: &str) -> bool {
+    let hex = address
+        .strip_prefix("0x")
+        .or_else(|| address.strip_prefix("0X"));
+    match hex {
+        Some(rest) => !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()),
+        None => false,
+    }
 }
 
 /// `git status --porcelain=v1` cleanliness check. `None` when git is
@@ -484,6 +538,26 @@ mod tests {
         assert_eq!(minimal.len(), 1);
         assert_eq!(minimal[0].pid, 0);
         assert_eq!(minimal[0].title, "");
+    }
+
+    #[test]
+    fn hex_address_validation_is_strict() {
+        assert!(is_hex_address("0xaaaafa4573b0"));
+        assert!(is_hex_address("0XABCDEF"));
+        assert!(is_hex_address("0x0"));
+        assert!(!is_hex_address(""));
+        assert!(!is_hex_address("aaaafa4573b0"));
+        assert!(!is_hex_address("0x"));
+        assert!(!is_hex_address("0xZZZ"));
+        assert!(!is_hex_address("0x123; rm -rf ~"));
+        assert!(!is_hex_address("0x12 34"));
+        assert!(!is_hex_address("address:0x123"));
+    }
+
+    #[test]
+    fn launch_terminal_refuses_empty_directory() {
+        let plat = LinuxPlatform;
+        assert!(plat.launch_terminal("").is_err());
     }
 
     #[test]

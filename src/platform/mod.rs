@@ -50,8 +50,13 @@ pub struct GitInfo {
     pub clean: Option<bool>,
 }
 
-/// Capabilities the core needs from the host OS. Pure observation only:
-/// no killing, no focusing, no configuration changes.
+/// Capabilities the core needs from the host OS.
+///
+/// Observation (`processes`, `windows`, `git_info`, …) is side-effect free.
+/// Actions (`launch_terminal`, `focus_window_address`) are explicit,
+/// user-initiated, fixed-form operations — never arbitrary commands.
+/// M4 safety levels: focus is Level 1, terminal launch is Level 2.
+/// There is no Level 3+ (agent start, arbitrary execution) in this trait.
 pub trait Platform {
     fn processes(&self) -> Vec<RawProcess>;
     fn windows(&self) -> Vec<WindowInfo>;
@@ -62,4 +67,10 @@ pub trait Platform {
     /// Ticks per second for `starttime_ticks` conversion (Linux: 100).
     fn clock_ticks_per_sec(&self) -> i64;
     fn hostname(&self) -> String;
+    /// Open a terminal at an already-validated absolute directory, detached.
+    /// Implementations must not invoke a shell and must not interpolate.
+    fn launch_terminal(&self, directory: &str) -> Result<(), String>;
+    /// Focus a compositor window by its validated address (`0x…` hex).
+    /// Best-effort: fails cleanly when the window is gone.
+    fn focus_window_address(&self, address: &str) -> Result<(), String>;
 }

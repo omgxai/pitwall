@@ -8,6 +8,22 @@
 //! - opaque: `proj_<hex>` / `sess_<hex>`, FNV-1a 64 over documented inputs.
 //!
 //! Deliberately not UUIDs/random: no RNG, no clock, no stored mapping needed.
+//!
+//! ## Identity semantics (M4)
+//!
+//! `sess_*` names a **terminal context**: one compositor window plus its
+//! root process, doing work in one project directory. It deliberately does
+//! NOT distinguish three related but different things:
+//!
+//! - (B) terminal context — what `sess_*` identifies;
+//! - (C) agent run — restarting the agent inside the same terminal keeps
+//!   the same `sess_*` (the agent kind is recorded as an attribute, and a
+//!   checkpoint row is still written per turnover);
+//! - (D) human work session — a human task may span terminals, restarts,
+//!   and days; Pitwall correlates those via `project_id`, never by
+//!   pretending one terminal equals one task.
+//!
+//! Same project (A) across terminals/restarts always shares `proj_*`.
 
 use std::fmt::Write as _;
 

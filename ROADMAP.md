@@ -14,8 +14,10 @@ until M(n) is stable and committed.
 - [x] **M3 — Omarchy panel prototype**: `dev.pitwall` bar-widget (indicator +
   KeyboardPanel popup) reading `state.json`; Focus via native activate;
   dev-installed, screenshot-verified.
-- [ ] **M4 — Project/terminal mapping + checkpoints + Resume**: git-aware
-  project detection, checkpoint records, focus/open actions.
+- [x] **M4 — Checkpoints + Resume**: severity-ordered session state,
+  `checkpoints` table (manual + disappearance triggers, bounded retention),
+  `pitwall checkpoint` / `pitwall resume` (focus-or-terminal, never agents),
+  state.json v2 `resumable`, panel RESUME section. Safety Levels 1–2 only.
 - [ ] **M5 — OpenRouter BYO integration**: optional cached one-line summaries
   with deterministic fallback; key via env/keyring, never logged.
 - [ ] **M6 — Packaging + first public release**: `install.sh`, docs pass,

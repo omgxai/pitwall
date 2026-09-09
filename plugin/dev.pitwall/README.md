@@ -41,6 +41,17 @@ all detection lives in the Rust daemon/CLI, never in QML.
 - ActivityStrip encodes recency (height) × state (color) from real
   `last_activity` epochs only. Never labeled CPU/productivity/health.
 - Pulse: 1400ms, opacity 1.0↔0.65, running-state only, dead otherwise.
+- Focus uses native `Toplevel.activate()` (app-id + title tiebreak,
+  refuse-on-ambiguous) — no subprocess. Note on `hyprctl dispatch`: only
+  the *bare multi-token* form is broken in this environment (its Lua
+  shorthand rejects even `exec echo hi`); the Omarchy Lua form
+  (`hl.dsp.focus({window=...})`, cf. `omarchy-hyprland-focus-app`)
+  exists and works. `Toplevel.activate()` remains preferred: native,
+  zero-subprocess, same mechanism as first-party widgets.
+- Resume (M4): live rows focus natively; vanished checkpoints resume via
+  fixed-form `pitwall resume --session-id <id>` (validated
+  `sess_[0-9a-f]{16}`, exit-visible `Process`, no shell). Never starts
+  an agent; refusals warn and leave the panel stable.
 
 ## Dev workflow
 
@@ -56,3 +67,11 @@ omarchy-shell dev.pitwall toggle
 ```
 
 Needs `state.json` present: run `pitwall snapshot` (or wait for the timer).
+
+> Hot-reload caveat (verified live): the shell reuses already-compiled
+> components when the entry URL is unchanged, so QML *content* edits may
+> not take effect until `omarchy-restart-shell` (lock-guarded: refuses
+> while the session is locked). Manifest/metadata-only edits apply live.
+> During M4 development, hot-reload served stale components across
+> reloads and even a disable/enable cycle — only a shell restart loaded
+> the new code. Always screenshot-verify after QML changes.

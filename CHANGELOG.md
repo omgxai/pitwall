@@ -7,6 +7,12 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M4 checkpoints + Resume: severity-ordered session state; `checkpoints`
+  table (schema v2, manual/disappearance triggers, 25/project + 500
+  retention, 280-char notes); `pitwall checkpoint` / `pitwall resume`
+  (Levels 1–2, strict validation, no fallbacks, never agents);
+  `Platform::{launch_terminal, focus_window_address}`; state.json v2
+  `resumable`; panel RESUME section; ADR-008.
 - M3 panel instrumentation polish: subconscious 1400ms working pulse,
   160–180ms state/data transitions (budget-held), ActivityStrip honesty
   kept, gauge deliberately omitted (documented). No Rust/state.json

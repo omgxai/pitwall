@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -20,6 +21,7 @@ Panel {
 
   readonly property var primary: stateReader.primarySession
   readonly property var others: stateReader.otherSessions
+  readonly property bool hasResumable: stateReader.resumable.length > 0
   readonly property bool stale: stateReader.isStale(nowMs)
 
   // Attention = a stopped (waiting) session or stale data. Drives the
@@ -110,6 +112,38 @@ Panel {
   function elapsedFor(s) {
     if (!s || !s.last_activity) return ""
     return stateReader.ageText(s.last_activity.epoch, nowMs)
+  }
+
+  // Level-2 Resume for vanished sessions: fixed-form `pitwall resume`
+  // through Quickshell.Process (exit-visible, no shell). The session id is
+  // re-validated here even though it came from our own state file — the
+  // file is a trust boundary (user-writable). Failures warn; panel stable.
+  function resumeCheckpoint(sessionId) {
+    var sid = String(sessionId || "")
+    if (!/^sess_[0-9a-f]{16}$/.test(sid)) {
+      console.warn("pitwall", "Refusing resume with invalid session id", sid)
+      return
+    }
+    resumeProc.sessionId = sid
+    resumeProc.running = true
+  }
+
+  function elapsedForCheckpoint(c) {
+    if (!c) return ""
+    return stateReader.ageText(c.created_at, nowMs)
+  }
+
+  Process {
+    id: resumeProc
+    property string sessionId: ""
+    command: ["pitwall", "resume", "--session-id", sessionId]
+    stdout: StdioCollector {}
+    stderr: StdioCollector {}
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        console.warn("pitwall", "resume exited", exitCode, "for", resumeProc.sessionId)
+      }
+    }
   }
 
   onOpenedChanged: if (opened) {
@@ -247,6 +281,38 @@ Panel {
           width: parent.width
           textFormat: Text.PlainText
           text: "+" + (root.others.length - 4) + " more"
+          color: Qt.darker(Color.foreground, 1.4)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          renderType: Text.NativeRendering
+        }
+
+        PanelSeparator {
+          visible: root.hasResumable
+          width: parent.width
+        }
+
+        PanelSectionHeader {
+          visible: root.hasResumable
+          width: parent.width
+          text: "RESUME"
+        }
+
+        Repeater {
+          model: Math.min(stateReader.resumable.length, 5)
+          delegate: ResumableRow {
+            width: column.width
+            checkpoint: stateReader.resumable[index]
+            elapsed: root.elapsedForCheckpoint(stateReader.resumable[index])
+            onResumeRequested: function(sid) { root.resumeCheckpoint(sid) }
+          }
+        }
+
+        Text {
+          visible: stateReader.resumable.length > 5
+          width: parent.width
+          textFormat: Text.PlainText
+          text: "+" + (stateReader.resumable.length - 5) + " more checkpoints"
           color: Qt.darker(Color.foreground, 1.4)
           font.family: Style.font.family
           font.pixelSize: Style.font.caption

@@ -294,22 +294,31 @@ fn classify_agent(processes: &[ProcessInfo], window: Option<&WindowInfo>) -> Age
     }
 }
 
-/// Derive the session state from its tree: stopped wins over running wins
-/// over sleeping; empty/unknown-only trees are `Unknown`.
+/// Derive the session state from its tree, order-independently.
+///
+/// Severity precedence (highest wins regardless of pid order):
+/// Stopped > Running/DiskSleep > Sleeping/Idle > Unknown.
+/// Zombie/Dead/empty trees contribute nothing: a tree of only zombies is
+/// `Unknown`, and a single Stopped process outranks any number of Running
+/// ones (a waiting job must never be masked by an unrelated live child).
 fn derive_session_state(processes: &[ProcessInfo]) -> SessionState {
-    let mut saw_sleep = false;
+    let mut severity = 0u8;
     for p in processes {
-        match p.state {
-            ProcessState::Stopped => return SessionState::Stopped,
-            ProcessState::Running | ProcessState::DiskSleep => return SessionState::Running,
-            ProcessState::Sleeping | ProcessState::Idle => saw_sleep = true,
-            ProcessState::Zombie | ProcessState::Dead | ProcessState::Unknown => {}
+        let rank = match p.state {
+            ProcessState::Stopped => 3,
+            ProcessState::Running | ProcessState::DiskSleep => 2,
+            ProcessState::Sleeping | ProcessState::Idle => 1,
+            ProcessState::Zombie | ProcessState::Dead | ProcessState::Unknown => 0,
+        };
+        if rank > severity {
+            severity = rank;
         }
     }
-    if saw_sleep {
-        SessionState::Sleeping
-    } else {
-        SessionState::Unknown
+    match severity {
+        3 => SessionState::Stopped,
+        2 => SessionState::Running,
+        1 => SessionState::Sleeping,
+        _ => SessionState::Unknown,
     }
 }
 
@@ -511,6 +520,12 @@ mod tests {
         fn hostname(&self) -> String {
             "testbox".to_string()
         }
+        fn launch_terminal(&self, _directory: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn focus_window_address(&self, _address: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     fn raw(
@@ -671,6 +686,110 @@ mod tests {
         };
         let snap = collect(&plat);
         assert_eq!(snap.sessions[0].state, SessionState::Stopped);
+    }
+
+    fn proc_with_state(pid: u32, state: ProcessState) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            ppid: 1,
+            name: "x".to_string(),
+            command: "x".to_string(),
+            cwd: "/home/u/Work".to_string(),
+            state,
+            started_at_epoch: 1,
+        }
+    }
+
+    #[test]
+    fn state_severity_is_order_independent() {
+        // Every permutation of a mixed tree must agree: Stopped wins.
+        let mixed = [
+            ProcessState::Running,
+            ProcessState::Sleeping,
+            ProcessState::Stopped,
+            ProcessState::Zombie,
+            ProcessState::Unknown,
+        ];
+        let mut orders = vec![
+            vec![0, 1, 2, 3, 4],
+            vec![4, 3, 2, 1, 0],
+            vec![2, 0, 4, 1, 3],
+            vec![1, 3, 0, 4, 2],
+        ];
+        // Rotate through all cyclic shifts too.
+        for shift in 0..5 {
+            orders.push((0..5).map(|i| (i + shift) % 5).collect());
+        }
+        for order in orders {
+            let procs: Vec<ProcessInfo> = order
+                .iter()
+                .enumerate()
+                .map(|(n, &m)| proc_with_state(n as u32, mixed[m]))
+                .collect();
+            assert_eq!(
+                derive_session_state(&procs),
+                SessionState::Stopped,
+                "order {order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stopped_beats_running_regardless_of_pid_order() {
+        // Real-world case: low-pid Running agent + high-pid STOPPED job.
+        let procs = vec![
+            proc_with_state(100, ProcessState::Running),
+            proc_with_state(99999, ProcessState::Stopped),
+        ];
+        assert_eq!(derive_session_state(&procs), SessionState::Stopped);
+        // And the reverse pid assignment.
+        let procs = vec![
+            proc_with_state(100, ProcessState::Stopped),
+            proc_with_state(99999, ProcessState::Running),
+        ];
+        assert_eq!(derive_session_state(&procs), SessionState::Stopped);
+    }
+
+    #[test]
+    fn state_precedence_chain() {
+        use ProcessState as P;
+        assert_eq!(
+            derive_session_state(&[proc_with_state(1, P::Running)]),
+            SessionState::Running
+        );
+        assert_eq!(
+            derive_session_state(&[proc_with_state(1, P::DiskSleep)]),
+            SessionState::Running
+        );
+        assert_eq!(
+            derive_session_state(&[
+                proc_with_state(1, P::Running),
+                proc_with_state(2, P::Sleeping),
+            ]),
+            SessionState::Running
+        );
+        assert_eq!(
+            derive_session_state(&[proc_with_state(1, P::Sleeping), proc_with_state(2, P::Idle),]),
+            SessionState::Sleeping
+        );
+        assert_eq!(
+            derive_session_state(&[proc_with_state(1, P::Sleeping)]),
+            SessionState::Sleeping
+        );
+        assert_eq!(
+            derive_session_state(&[proc_with_state(1, P::Unknown)]),
+            SessionState::Unknown
+        );
+        // Zombies/dead alone are Unknown, and never outrank the living.
+        assert_eq!(
+            derive_session_state(&[proc_with_state(1, P::Zombie), proc_with_state(2, P::Dead)]),
+            SessionState::Unknown
+        );
+        assert_eq!(
+            derive_session_state(&[proc_with_state(1, P::Zombie), proc_with_state(2, P::Idle)]),
+            SessionState::Sleeping
+        );
+        assert_eq!(derive_session_state(&[]), SessionState::Unknown);
     }
 
     #[test]

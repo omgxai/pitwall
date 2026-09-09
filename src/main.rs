@@ -31,6 +31,10 @@ fn print_help() {
     println!("    status [--json]  Show detected workspace sessions");
     println!("    snapshot         Persist one observation to the local cache");
     println!("                     [--db PATH] [--state PATH] [--data-dir DIR]");
+    println!("    checkpoint       Record a workspace checkpoint now");
+    println!("                     [--note TEXT] [--session-id ID]");
+    println!("    resume           Focus a live session or open its project terminal");
+    println!("                     --session-id ID [--data-dir DIR]");
 }
 
 #[cfg(target_os = "linux")]
@@ -87,6 +91,7 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
     let state_file = state_path.unwrap_or_else(|| dir.join(store::STATE_FILENAME));
 
     let snapshot = collector::collect(&platform());
+    let mut resumable: Vec<store::Checkpoint> = Vec::new();
 
     // 1. Persist (degradable).
     match store::Store::open(&db) {
@@ -99,6 +104,23 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
             match s.persist(&snapshot) {
                 Ok(store::PersistOutcome::Written { observation_id }) => {
                     println!("snapshot: wrote observation {observation_id}");
+                    // Disappearance checkpoints: sessions present last time
+                    // but gone now (at most one per absence; re-fires only
+                    // after reappearance). Degradable like persist.
+                    let live_ids: Vec<String> =
+                        snapshot.sessions.iter().map(|s| s.id.clone()).collect();
+                    match s.checkpoint_disappearances(&live_ids, observation_id, now_epoch()) {
+                        Ok(ids) => {
+                            for id in ids {
+                                println!("snapshot: disappearance checkpoint {id}");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "pitwall snapshot: warning: disappearance check failed ({e})"
+                            );
+                        }
+                    }
                 }
                 Ok(store::PersistOutcome::Unchanged) => {
                     println!("snapshot: unchanged, no write");
@@ -107,6 +129,21 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
                     eprintln!(
                         "pitwall snapshot: warning: persist failed ({e}); continuing live-only"
                     );
+                }
+            }
+            // Resumable list for state.json v2 (degradable: empty on failure).
+            // Only vanished sessions: live ones already render as rows.
+            match s.latest_checkpoints(10) {
+                Ok(cps) => {
+                    let live: std::collections::HashSet<&str> =
+                        snapshot.sessions.iter().map(|s| s.id.as_str()).collect();
+                    resumable = cps
+                        .into_iter()
+                        .filter(|c| !live.contains(c.session_id.as_str()))
+                        .collect();
+                }
+                Err(e) => {
+                    eprintln!("pitwall snapshot: warning: checkpoint read failed ({e})");
                 }
             }
         }
@@ -123,7 +160,7 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
     // 2. Refresh the state.json artifact (degradable, preserves last good).
     match store::atomic_write(
         &state_file,
-        output::snapshot_to_state_json(&snapshot).as_bytes(),
+        output::snapshot_to_state_json(&snapshot, &resumable).as_bytes(),
     ) {
         Ok(()) => println!("snapshot: state artifact {}", state_file.display()),
         Err(e) => {
@@ -133,6 +170,121 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(-1)
+}
+
+/// Explicit manual checkpoint (`trigger::MANUAL`). Records live sessions;
+/// never synthesizes context.
+fn cmd_checkpoint(args: &[String]) -> ExitCode {
+    let mut note: Option<String> = None;
+    let mut only_session: Option<String> = None;
+    let mut data_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--note" => {
+                i += 1;
+                note = args.get(i).cloned();
+            }
+            "--session-id" => {
+                i += 1;
+                only_session = args.get(i).cloned();
+            }
+            "--data-dir" => {
+                i += 1;
+                data_dir = args.get(i).map(PathBuf::from);
+            }
+            other => {
+                eprintln!("pitwall checkpoint: unknown option '{other}'.");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+    let dir = data_dir.unwrap_or_else(store::default_data_dir);
+    let db = dir.join(store::DB_FILENAME);
+    let snapshot = collector::collect(&platform());
+    match store::Store::open(&db) {
+        Ok(mut s) => match s.checkpoint_live(
+            &snapshot,
+            only_session.as_deref(),
+            note.as_deref(),
+            now_epoch(),
+        ) {
+            Ok(ids) if ids.is_empty() => {
+                eprintln!("pitwall checkpoint: no matching live session with a project");
+                ExitCode::from(1)
+            }
+            Ok(ids) => {
+                for id in ids {
+                    println!("checkpoint: wrote checkpoint {id}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("pitwall checkpoint: store failed ({e})");
+                ExitCode::from(1)
+            }
+        },
+        Err(e) => {
+            eprintln!("pitwall checkpoint: store unavailable ({e})");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Thin CLI wrapper over [`pitwall_lib::resume::resume`] (Level 1–2 only).
+fn cmd_resume(args: &[String]) -> ExitCode {
+    let mut session_id: Option<String> = None;
+    let mut data_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--session-id" => {
+                i += 1;
+                session_id = args.get(i).cloned();
+            }
+            "--data-dir" => {
+                i += 1;
+                data_dir = args.get(i).map(PathBuf::from);
+            }
+            other => {
+                eprintln!("pitwall resume: unknown option '{other}'.");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+    let Some(sid) = session_id else {
+        eprintln!("pitwall resume: --session-id is required");
+        return ExitCode::from(2);
+    };
+    let dir = data_dir.unwrap_or_else(store::default_data_dir);
+    let db = dir.join(store::DB_FILENAME);
+    match pitwall_lib::resume::resume(&platform(), &db, &sid) {
+        Ok(pitwall_lib::resume::ResumeOutcome::FocusedLive { session_id }) => {
+            println!("resume: focused live session {session_id}");
+            ExitCode::SUCCESS
+        }
+        Ok(pitwall_lib::resume::ResumeOutcome::OpenedTerminal { directory }) => {
+            println!("resume: opened terminal at {directory}");
+            ExitCode::SUCCESS
+        }
+        Err(e) if e.contains("malformed") => {
+            eprintln!("pitwall resume: {e}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("pitwall resume: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -163,6 +315,8 @@ fn main() -> ExitCode {
             cmd_status(json)
         }
         Some("snapshot") => cmd_snapshot(&args[1..]),
+        Some("checkpoint") => cmd_checkpoint(&args[1..]),
+        Some("resume") => cmd_resume(&args[1..]),
         Some(other) => {
             eprintln!("pitwall: unknown subcommand '{other}'. Run `pitwall --help`.");
             ExitCode::from(2)

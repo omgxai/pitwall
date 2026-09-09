@@ -8,11 +8,11 @@ local-first awareness and continuity layer above them: one glance tells you
 what is happening across your workspace, and when you return to your machine
 you can resume without reconstructing context.
 
-> **Status:** v0.1.0 in development (M2). `pitwall status [--json]` observes
-> live sessions; `pitwall snapshot` persists to a local SQLite cache and
-> refreshes `state.json`. Panel, summaries, and checkpoints are not
-> implemented yet. See [ROADMAP.md](ROADMAP.md) and
-> [.pitwall/STATE.md](.pitwall/STATE.md).
+> **Status:** v0.1.0 in development (M4). `pitwall status [--json]`
+> observes; `pitwall snapshot` persists; `pitwall checkpoint` records
+> workspace checkpoints; `pitwall resume --session-id …` focuses a live
+> session or opens its project terminal (never starts agents). Panel,
+> summaries, and packaging are in progress. See [ROADMAP.md](ROADMAP.md).
 
 ## What is Pitwall?
 

@@ -56,3 +56,18 @@ Enforcement: unit tests assert secret-bearing fixtures never reach database
 bytes (`full_cmdline_never_reaches_sqlite`) or the state artifact
 (`state_artifact_is_separate_versioned_and_scrubbed`). CI secret-scan
 covers the repository itself.
+
+## M4 action boundary
+
+Resume executes only two fixed-form operations, both user-initiated:
+
+- Level 1 — focus a live window by validated `0x…` address (native
+  compositor activation; CLI equivalent uses the first-party Lua dispatch
+  shape with argv passing, never a shell).
+- Level 2 — open one terminal at a validated absolute existing directory
+  (`xdg-terminal-exec --dir`, fixed argv, no shell, no interpolation).
+
+Refusals (malformed id, unknown session, missing/non-dir path, launch
+failure) exit non-zero with a reason and never fall back to another
+target. There is no agent-start path and no arbitrary-command path;
+checkpoint notes are length-capped labels, never interpreted.

@@ -51,7 +51,7 @@ Item {
     PanelActionButton {
       // md-crosshairs U+F034E — coverage verified in JetBrainsMono Nerd Font.
       iconText: String.fromCodePoint(0xF034E)
-      tooltipText: "Focus terminal"
+      tooltipText: "Resume: focus terminal"
       focusable: true
       onClicked: root.focusRequested()
     }
