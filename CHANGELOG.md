@@ -7,6 +7,10 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- Docs governance: disciplined public roadmap (M5 frozen, hardening +
+  AI Workforce/Recipes directions), refreshed README, new
+  `docs/AI_WORKFORCE.md` + `docs/RECIPES.md`, corrected security
+  wording to agent-delegated summaries.
 - M5f final polish (UI freeze): glyph-only confidence, process counts,
   expander affordances, clamped ticker with attention line, state-word
   detail cards, trash removal; grouping verified window-rooted.

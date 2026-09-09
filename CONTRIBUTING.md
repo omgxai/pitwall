@@ -30,6 +30,12 @@ Use the bug report / feature request templates. Include: Omarchy version,
 `hyprctl version` output, `pitwall --version`, and steps to reproduce.
 Never paste secrets or API keys into issues.
 
+## Sharing workflows
+
+Ran a good human+agent workflow with Pitwall? Write it up as a recipe —
+see `docs/RECIPES.md`. Recipes document practice, not theory: run it
+first, keep it small, name the human approval boundaries explicitly.
+
 ## Code of Conduct
 
 By participating you agree to uphold [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

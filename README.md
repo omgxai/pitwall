@@ -8,11 +8,12 @@ local-first awareness and continuity layer above them: one glance tells you
 what is happening across your workspace, and when you return to your machine
 you can resume without reconstructing context.
 
-> **Status:** v0.1.0 in development (M4). `pitwall status [--json]`
-> observes; `pitwall snapshot` persists; `pitwall checkpoint` records
-> workspace checkpoints; `pitwall resume --session-id …` focuses a live
-> session or opens its project terminal (never starts agents). Panel,
-> summaries, and packaging are in progress. See [ROADMAP.md](ROADMAP.md).
+> **Status:** v0.1.0 in development, M5 UI frozen. `pitwall status`
+> observes; `pitwall snapshot` persists; `pitwall checkpoint` records;
+> `pitwall resume` focuses or reopens; `pitwall summarize` asks your
+> configured agent for a workspace summary (cached locally); the Omarchy
+> bar widget shows sessions, checkpoints, and Resume actions.
+> See [ROADMAP.md](ROADMAP.md).
 
 ## What is Pitwall?
 
@@ -75,8 +76,16 @@ Omarchy panel development (from M3): copy `plugin/dev.pitwall` to
 ## Privacy & security
 
 Local-first. Workspace data stays on your machine (SQLite). The optional
-OpenRouter summarizer (deferred to M5) sends only minimal, user-approved
-context and never secrets. See [SECURITY.md](SECURITY.md).
+AI summary delegates to your own configured agent (OpenCode, …) with a
+small sanitized context — no provider keys in Pitwall, no cloud, no
+telemetry, never secrets. See [SECURITY.md](SECURITY.md).
+
+## AI workforce & recipes
+
+Pitwall pairs with an open pattern for humans working alongside AI
+agents ([AI Workforce Design](docs/AI_WORKFORCE.md)) and a community
+format for reusable workflows ([Pitwall Recipes](docs/RECIPES.md)).
+Bring your own workflow: build it, test it, share the recipe.
 
 ## Contribute
 

@@ -19,9 +19,10 @@ until the first tagged release; a version table will be published at v0.1.0.
    backend, no telemetry, no mandatory accounts.
 2. **Secrets never travel.** API keys and tokens are never committed, logged,
    embedded in prompts, or exposed through summaries or UI output.
-3. **Minimal LLM context.** The optional OpenRouter summarizer receives only
-   the minimum fields needed (project name, branch, process state, short
-   activity line) — never file contents or credentials.
+3. **Minimal delegated context.** The optional AI summary is produced by
+   the user's own configured agent (never a Pitwall provider key) from a
+   small sanitized context — project/branch/state labels, never file
+   contents or credentials.
 4. **Human approval is the security boundary.** Agents may request; only the
    human approves (future approval layer). No autonomous privileged actions.
 5. **Safe action layer.** MVP actions are limited to focusing/opening

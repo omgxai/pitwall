@@ -40,15 +40,34 @@ Single-agent operation (PRE only). Awaiting user direction.
 
 ---
 
+## 2026-09-10 — Docs & roadmap governance (PRE)
+
+### Objective
+Public roadmap/AI-workforce documentation freeze. Docs only; no code,
+no milestones, no M5g.
+
+### Implementation
+- Rewrote `ROADMAP.md`: built milestones marked complete, M5 frozen,
+  M5-hardening + AI Workforce Design + Recipes directions, governance
+  rule, contribution areas, M6 intact.
+- Refreshed `README.md` status (M5f), removed obsolete OpenRouter
+  wording, added workforce/recipes pointers.
+- Added `docs/AI_WORKFORCE.md`, `docs/RECIPES.md`.
+- Fixed `SECURITY.md` principle 3 (agent-delegated, was OpenRouter).
+- Added recipe note to `CONTRIBUTING.md`.
+- Commercial-term scan: clean (below).
+
+### Verification
+- `git status` clean before/after; docs-only diff; markdown reviewed.
+- No Rust/QML behavior changed (`cargo` untouched by this task).
+
+### Status
+Complete. Awaiting user direction.
+
+---
+
 ## CURRENT STATE
 
-- Milestone: M5f polish committed (`c57e6f9`); M5 UI FROZEN.
-- Latest verified commit: `c57e6f9` (== origin/main, tree clean).
-- Active child agents: NONE (Child 1 IDLE-unstaffed, Child 2 IDLE-unstaffed).
-- Active tasks: none.
-- Completed work: M0–M5f per STATE.md/CHANGELOG.md.
-- Blocked work: none.
-- Known limitations: manual click-through never done headlessly;
-  6+ sessions / vertical bar untested live; kitty text path unvalidated
-  live; STATE.md top block needed de-staling (done).
+- Latest verified commit: evolving this run (docs governance; verify at push).
+- Active child agents: NONE (inbox tasks queued, unstaffed).
 - Next action: user decides — M5g hardening kickoff or child staffing.
