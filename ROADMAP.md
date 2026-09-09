@@ -22,7 +22,8 @@ until M(n) is stable and committed.
   (existing user agents, no provider keys), evidence/role improvements,
   derived activity, pixel-flag identity, scrollable panel. NO OpenRouter,
   no cloud, no autonomous behavior. In progress (M5a + M5c done; M5b
-  events folded into M5c as read-time derivation).
+  events folded into M5c as read-time derivation; M5d Part 1 adds
+  the summaries cache + state.json v3 contract (no UI yet).
 - [ ] **M6 — Packaging + first public release**: `install.sh`, docs pass,
   clean-room install verified, v0.1.0 tag.
 

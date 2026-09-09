@@ -27,6 +27,22 @@ Item {
   readonly property int sessionCount: sessions.length
   // v2 additive key; absent on v1 (panel tolerates both).
   readonly property var resumable: (record && Array.isArray(record.resumable)) ? record.resumable : []
+  // v3 additive key (M5d contract; M5f renders it). Null/absent means
+  // no summary yet; malformed shapes degrade to null, never a crash.
+  readonly property var summary: {
+    var s = record ? record.summary : null
+    if (!s || typeof s !== "object" || Array.isArray(s)) return null
+    var status = String(s.status || "")
+    if (status !== "ready" && status !== "error" && status !== "unavailable") return null
+    return {
+      text: String(s.text || ""),
+      model: s.model ? String(s.model) : "",
+      created_at: Number(s.created_at) || 0,
+      input_hash: String(s.input_hash || ""),
+      status: status,
+      message: String(s.message || "")
+    }
+  }
   readonly property double collectedAt: record ? Number(record.collected_at || 0) : 0
 
   // Primary session = most recently active. Stable choice: ties keep array
@@ -107,7 +123,7 @@ Item {
       var parsed = JSON.parse(String(content || ""))
       var version = Number(parsed && parsed.state_version)
       var ok = parsed && typeof parsed === "object"
-        && (version === 1 || version === 2)
+        && (version === 1 || version === 2 || version === 3)
         && Array.isArray(parsed.sessions)
       if (!ok) throw new Error("unsupported state shape")
       root.record = parsed

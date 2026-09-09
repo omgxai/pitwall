@@ -7,6 +7,10 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M5d Part 1 summary persistence + state v3: `summaries` cache table
+  (input_hash PK; additive v3 migration preserving v2 rows), hash-gated
+  cache-first `summarize`, state.json v3 `summary{}` (ready/error/null),
+  strict StateReader `summary` property (no visuals yet).
 - M5c ephemeral AI context: `/proc` IO signals, best-effort kitty text
   with honest foot Unavailable, bounded context builder (10+10 lines,
   4KB/window, 6 sessions, 16KB cap), secret scrubbing, RAII ephemeral

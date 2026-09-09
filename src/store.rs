@@ -6,8 +6,8 @@
 //!
 //! Design (see pre-flight review):
 //!
-//! - three tables (`meta`, `observations`, `sessions`), `PRAGMA user_version`
-//!   schema gating, no migration framework;
+//! - tables (`meta`, `observations`, `sessions`, `checkpoints`,
+//!   `summaries`), `PRAGMA user_version` schema gating, no migration framework;
 //! - hash-gated writes: a snapshot is persisted only when its *meaningful*
 //!   content differs from the last persisted one (timestamps excluded), so
 //!   idle refreshes cost zero disk writes;
@@ -26,10 +26,11 @@ use std::path::{Path, PathBuf};
 /// SQLite `user_version` this code understands. Bump only with a new
 /// `create_schema` that old binaries must refuse (see [`StoreError::NewerVersion`]).
 ///
-/// v2 adds the `checkpoints` table (M4). v1 databases are pre-release local
-/// caches, not user data: opening one recreates it fresh (documented in
-/// ROADMAP/CHANGELOG, no migration framework by design).
-pub const STORE_SCHEMA_VERSION: i64 = 2;
+/// v3 adds the `summaries` cache table (M5d) via additive
+/// CREATE-IF-NOT-EXISTS: v1/v2 databases keep all existing rows.
+/// (The v1→v2 recreate was a one-time pre-release exception; v2 holds
+/// user checkpoints, so M5d migrates additively — still no framework.)
+pub const STORE_SCHEMA_VERSION: i64 = 3;
 
 /// Bounded-cache policy: keep the newest N observations (and their
 /// sessions). One deterministic rule — no time-based second policy.
@@ -47,16 +48,16 @@ pub const DB_FILENAME: &str = "pitwall.db";
 pub const STATE_FILENAME: &str = "state.json";
 
 const SCHEMA_SQL: &str = "
-CREATE TABLE meta (
+CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
-CREATE TABLE observations (
+CREATE TABLE IF NOT EXISTS observations (
   id           INTEGER PRIMARY KEY,
   collected_at INTEGER NOT NULL,
   hostname     TEXT NOT NULL
 );
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
   observation_id      INTEGER NOT NULL,
   session_id          TEXT NOT NULL,
   project_id          TEXT,
@@ -76,9 +77,9 @@ CREATE TABLE sessions (
   window_title        TEXT,
   workspace           TEXT
 );
-CREATE INDEX idx_sessions_observation ON sessions (observation_id);
-CREATE INDEX idx_sessions_session ON sessions (session_id);
-CREATE TABLE checkpoints (
+CREATE INDEX IF NOT EXISTS idx_sessions_observation ON sessions (observation_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_session ON sessions (session_id);
+CREATE TABLE IF NOT EXISTS checkpoints (
   id                  INTEGER PRIMARY KEY,
   created_at          INTEGER NOT NULL,
   project_id          TEXT NOT NULL,
@@ -96,8 +97,14 @@ CREATE TABLE checkpoints (
   trigger             TEXT NOT NULL,
   observation_id      INTEGER
 );
-CREATE INDEX idx_checkpoints_project ON checkpoints (project_id);
-CREATE INDEX idx_checkpoints_session ON checkpoints (session_id);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_project ON checkpoints (project_id);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints (session_id);
+CREATE TABLE IF NOT EXISTS summaries (
+  input_hash TEXT PRIMARY KEY,
+  text       TEXT NOT NULL,
+  model      TEXT,
+  created_at INTEGER NOT NULL
+);
 ";
 
 /// Failures opening or using the store. All are degradable: the caller
@@ -260,16 +267,20 @@ impl Store {
         if version > STORE_SCHEMA_VERSION {
             return Err(StoreError::NewerVersion(version));
         }
-        if version < STORE_SCHEMA_VERSION {
-            // Pre-release cache: v1 held no user-authored data, so recreate
-            // instead of migrating. (No migration framework by design.)
+        if version < 2 {
+            // Ancient pre-release cache (v1 held no user data): recreate.
             conn.execute_batch(
                 "DROP TABLE IF EXISTS sessions;
                  DROP TABLE IF EXISTS observations;
                  DROP TABLE IF EXISTS checkpoints;
+                 DROP TABLE IF EXISTS summaries;
                  DROP TABLE IF EXISTS meta;",
             )
             .map_err(StoreError::from)?;
+            create_schema(&conn).map_err(StoreError::from)?;
+        } else if version < STORE_SCHEMA_VERSION {
+            // Additive upgrade (v2 -> v3): create any missing tables,
+            // keep every existing row. No framework, one statement set.
             create_schema(&conn).map_err(StoreError::from)?;
         }
         Ok(Store {
@@ -799,6 +810,94 @@ impl Store {
             )
             .ok();
         Ok(row)
+    }
+}
+
+/// One cached AI summary: the final interpretation text plus minimal
+/// metadata. The summaries table NEVER carries terminal text, transcripts,
+/// argv, or context — only what the agent returned, already scrubbed
+/// upstream by construction (context was the only carrier, and it is
+/// ephemeral). Enforced by the column set itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryRow {
+    pub input_hash: String,
+    pub text: String,
+    pub model: Option<String>,
+    pub created_at: i64,
+}
+
+impl Store {
+    /// Look up a cached summary by input hash. `None` means generate.
+    pub fn lookup_summary(&self, input_hash: &str) -> Result<Option<SummaryRow>, StoreError> {
+        let row: Option<SummaryRow> = self
+            .conn
+            .query_row(
+                "SELECT input_hash, text, model, created_at FROM summaries WHERE input_hash = ?1",
+                rusqlite::params![input_hash],
+                |row| {
+                    Ok(SummaryRow {
+                        input_hash: row.get(0)?,
+                        text: row.get(1)?,
+                        model: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .ok();
+        Ok(row)
+    }
+
+    /// Store (or replace) the summary for an input hash. Only final text +
+    /// minimal metadata — callers cannot pass anything else (no params).
+    pub fn store_summary(
+        &self,
+        input_hash: &str,
+        text: &str,
+        model: Option<&str>,
+        created_at: i64,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO summaries (input_hash, text, model, created_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(input_hash) DO UPDATE SET
+                   text = excluded.text, model = excluded.model,
+                   created_at = excluded.created_at",
+                rusqlite::params![input_hash, text, model, created_at],
+            )
+            .map_err(StoreError::from)?;
+        Ok(())
+    }
+
+    /// Newest cached summary overall (state.json display contract).
+    pub fn latest_summary(&self) -> Result<Option<SummaryRow>, StoreError> {
+        let row: Option<SummaryRow> = self
+            .conn
+            .query_row(
+                "SELECT input_hash, text, model, created_at FROM summaries
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok(SummaryRow {
+                        input_hash: row.get(0)?,
+                        text: row.get(1)?,
+                        model: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .ok();
+        Ok(row)
+    }
+
+    /// Number of cached summaries (bounded in practice by hash cardinality;
+    /// one row per distinct workspace context).
+    pub fn summary_count(&self) -> Result<i64, StoreError> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM summaries", [], |row| row.get(0))
+            .map_err(StoreError::from)?;
+        Ok(n)
     }
 }
 
@@ -1344,6 +1443,93 @@ mod tests {
         let cps = store.latest_checkpoints(10).unwrap();
         assert_eq!(cps.len(), 2, "reader tolerates unexpected row content");
         assert_eq!(cps[0].session_id, "sess_x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn summaries_round_trip_and_latest_wins() {
+        let dir = test_dir("sum-roundtrip");
+        let store = Store::open(&dir.join("pitwall.db")).unwrap();
+        assert_eq!(store.summary_count().unwrap(), 0);
+        assert_eq!(store.latest_summary().unwrap(), None);
+        assert_eq!(store.lookup_summary("fnv:aaa").unwrap(), None);
+        store
+            .store_summary("fnv:aaa", "First.", Some("prov/m"), 100)
+            .unwrap();
+        store
+            .store_summary("fnv:bbb", "Second.", None, 200)
+            .unwrap();
+        assert_eq!(store.summary_count().unwrap(), 2);
+        let got = store.lookup_summary("fnv:aaa").unwrap().unwrap();
+        assert_eq!(got.text, "First.");
+        assert_eq!(got.model.as_deref(), Some("prov/m"));
+        let latest = store.latest_summary().unwrap().unwrap();
+        assert_eq!(latest.input_hash, "fnv:bbb");
+        // Replace semantics: same hash overwrites, count unchanged.
+        store
+            .store_summary("fnv:aaa", "First v2.", Some("prov/m"), 300)
+            .unwrap();
+        assert_eq!(store.summary_count().unwrap(), 2);
+        assert_eq!(
+            store.lookup_summary("fnv:aaa").unwrap().unwrap().text,
+            "First v2."
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v2_database_upgrades_additively_preserving_rows() {
+        use rusqlite::Connection;
+        let dir = test_dir("sum-migrate");
+        let db = dir.join("pitwall.db");
+        // Hand-build a v2-shaped database (no summaries table).
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE observations (id INTEGER PRIMARY KEY, collected_at INTEGER, hostname TEXT);
+                 CREATE TABLE sessions (observation_id INTEGER, session_id TEXT);
+                 INSERT INTO meta (key, value) VALUES ('k', 'v');
+                 INSERT INTO observations (id, collected_at, hostname) VALUES (1, 100, 'h');
+                 INSERT INTO sessions (observation_id, session_id) VALUES (1, 'sess_1');
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&db).unwrap();
+        // Old rows survive; new table exists and works.
+        assert_eq!(store.observation_count().unwrap(), 1);
+        let v: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, STORE_SCHEMA_VERSION);
+        // Write + read a summary through the upgraded handle.
+        store.store_summary("fnv:x", "Kept.", None, 400).unwrap();
+        assert_eq!(store.latest_summary().unwrap().unwrap().text, "Kept.");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn summaries_table_carries_no_evidence_columns() {
+        let dir = test_dir("sum-privacy");
+        let db = dir.join("pitwall.db");
+        let store = Store::open(&db).unwrap();
+        store
+            .store_summary("fnv:x", "Note hunter2 was here.", None, 1)
+            .unwrap();
+        drop(store);
+        // Column set is exactly the approved four.
+        let db2 = rusqlite::Connection::open(&db).unwrap();
+        let mut stmt = db2
+            .prepare("SELECT name FROM pragma_table_info('summaries') ORDER BY cid")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(cols, vec!["input_hash", "text", "model", "created_at"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

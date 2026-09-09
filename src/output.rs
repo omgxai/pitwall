@@ -160,7 +160,58 @@ pub fn snapshot_to_text(s: &WorkspaceSnapshot) -> String {
 //   project_dir, project_name (basename), branch, git_clean,
 //   agent_kind, state (normalized), last_activity_epoch, created_at,
 //   note, trigger. No PIDs, cmdlines, evidence, or secrets.
-pub const STATE_SCHEMA_VERSION: u32 = 2;
+pub const STATE_SCHEMA_VERSION: u32 = 3;
+
+/// Display status of the `summary` object in state.json. The panel uses
+/// this to distinguish no-summary-yet (`None` object), ready, failed, and
+/// disabled states. Error messages are fixed short strings — never agent
+/// internals, terminal content, or command lines.
+pub mod summary_status {
+    pub const READY: &str = "ready";
+    pub const ERROR: &str = "error";
+    pub const UNAVAILABLE: &str = "unavailable";
+}
+
+/// A persistable-ready AI summary for state.json. Only final text plus
+/// minimal metadata — the same boundary as the `summaries` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateSummary {
+    pub text: String,
+    pub model: Option<String>,
+    pub created_at: i64,
+    pub input_hash: String,
+    pub status: &'static str,
+    pub message: Option<String>,
+}
+
+impl StateSummary {
+    pub fn ready(
+        text: String,
+        model: Option<String>,
+        created_at: i64,
+        input_hash: String,
+    ) -> StateSummary {
+        StateSummary {
+            text,
+            model,
+            created_at,
+            input_hash,
+            status: summary_status::READY,
+            message: None,
+        }
+    }
+
+    pub fn error(message: &'static str) -> StateSummary {
+        StateSummary {
+            text: String::new(),
+            model: None,
+            created_at: 0,
+            input_hash: String::new(),
+            status: summary_status::ERROR,
+            message: Some(message.to_string()),
+        }
+    }
+}
 
 /// Cap on exposed resumable entries (panel shows a compact list, not history).
 pub const RESUMABLE_CAP: usize = 10;
@@ -184,7 +235,11 @@ fn project_basename(dir: &str) -> &str {
 }
 
 /// Render a snapshot as the `state.json` artifact (state schema v2).
-pub fn snapshot_to_state_json(s: &WorkspaceSnapshot, resumable: &[Checkpoint]) -> String {
+pub fn snapshot_to_state_json(
+    s: &WorkspaceSnapshot,
+    resumable: &[Checkpoint],
+    summary: Option<&StateSummary>,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "{{\"state_version\":{},\"collected_at\":{},\"hostname\":{},\"session_count\":{},\"sessions\":[",
@@ -254,7 +309,22 @@ pub fn snapshot_to_state_json(s: &WorkspaceSnapshot, resumable: &[Checkpoint]) -
             q(&cp.trigger)
         ));
     }
-    out.push_str("]}");
+    out.push_str("],");
+    match summary {
+        Some(sum) => {
+            out.push_str(&format!(
+                "\"summary\":{{\"text\":{},\"model\":{},\"created_at\":{},\"input_hash\":{},\"status\":{},\"message\":{}}}",
+                q(&sum.text),
+                opt_q(sum.model.as_deref()),
+                sum.created_at,
+                q(&sum.input_hash),
+                q(sum.status),
+                opt_q(sum.message.as_deref())
+            ));
+        }
+        None => out.push_str("\"summary\":null"),
+    }
+    out.push('}');
     out
 }
 
@@ -339,8 +409,8 @@ mod tests {
         let mut snap = sample_snapshot();
         snap.sessions[0].processes[0].command = "opencode --token hunter2-supersecret".to_string();
         snap.sessions[0].agent.evidence = vec!["cmd:opencode (pid 10)".to_string()];
-        let state = snapshot_to_state_json(&snap, &[]);
-        assert!(state.starts_with("{\"state_version\":2"), "{state}");
+        let state = snapshot_to_state_json(&snap, &[], None);
+        assert!(state.starts_with("{\"state_version\":3"), "{state}");
         assert!(state.contains("\"summary\":"), "{state}");
         assert!(state.contains("\"resumable\":[]"), "{state}");
         assert!(
@@ -357,6 +427,86 @@ mod tests {
             "process detail excluded: {state}"
         );
         assert!(!state.contains("\"pid\""), "pids excluded: {state}");
+    }
+
+    #[test]
+    fn state_v3_carries_ready_summary() {
+        let snap = sample_snapshot();
+        let sum = StateSummary::ready(
+            "All quiet.".to_string(),
+            Some("prov/model".to_string()),
+            1_700_000_300,
+            "fnv:abc123".to_string(),
+        );
+        let state = snapshot_to_state_json(&snap, &[], Some(&sum));
+        assert!(
+            state.contains("\"summary\":{\"text\":\"All quiet.\""),
+            "{state}"
+        );
+        assert!(state.contains("\"status\":\"ready\""), "{state}");
+        assert!(state.contains("\"model\":\"prov/model\""), "{state}");
+        assert!(state.contains("\"input_hash\":\"fnv:abc123\""), "{state}");
+    }
+
+    #[test]
+    fn state_v3_error_state_is_short_and_safe() {
+        let snap = sample_snapshot();
+        let sum = StateSummary::error("timeout");
+        let state = snapshot_to_state_json(&snap, &[], Some(&sum));
+        assert!(state.contains("\"status\":\"error\""), "{state}");
+        assert!(state.contains("\"message\":\"timeout\""), "{state}");
+        assert!(state.contains("\"text\":\"\""), "{state}");
+    }
+
+    /// String-aware JSON well-formedness: balanced {}[] outside strings,
+    /// valid escapes, no trailing garbage. Catches brace bugs that
+    /// substring assertions miss (e.g. a doubled closing brace).
+    fn assert_well_formed(json: &str) {
+        let mut stack: Vec<char> = Vec::new();
+        let mut chars = json.chars().peekable();
+        let mut in_str = false;
+        while let Some(c) = chars.next() {
+            if in_str {
+                if c == '\\' {
+                    chars.next();
+                } else if c == '"' {
+                    in_str = false;
+                }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '{' => stack.push('}'),
+                '[' => stack.push(']'),
+                '}' | ']' => assert_eq!(stack.pop(), Some(c), "unbalanced in {json}"),
+                _ => {}
+            }
+        }
+        assert!(!in_str, "unterminated string in {json}");
+        assert!(stack.is_empty(), "unclosed brackets in {json}");
+    }
+
+    #[test]
+    fn all_artifacts_are_well_formed_json() {
+        let snap = sample_snapshot();
+        let cps = vec![sample_checkpoint(1, "sess_x")];
+        let sum = StateSummary::ready("Hi.".to_string(), None, 1, "fnv:1".to_string());
+        assert_well_formed(&snapshot_to_json(&snap));
+        assert_well_formed(&snapshot_to_state_json(&snap, &[], None));
+        assert_well_formed(&snapshot_to_state_json(&snap, &cps, None));
+        assert_well_formed(&snapshot_to_state_json(&snap, &cps, Some(&sum)));
+        assert_well_formed(&snapshot_to_state_json(
+            &snap,
+            &cps,
+            Some(&StateSummary::error("timeout")),
+        ));
+    }
+
+    #[test]
+    fn state_v3_absent_summary_is_null() {
+        let snap = sample_snapshot();
+        let state = snapshot_to_state_json(&snap, &[], None);
+        assert!(state.contains("\"summary\":null"), "{state}");
     }
 
     fn sample_checkpoint(id: i64, session: &str) -> Checkpoint {
@@ -387,7 +537,7 @@ mod tests {
             sample_checkpoint(2, "sess_old"),
             sample_checkpoint(1, "sess_older"),
         ];
-        let state = snapshot_to_state_json(&snap, &cps);
+        let state = snapshot_to_state_json(&snap, &cps, None);
         // v1 shape intact (newest-first resumable is purely additive).
         assert!(state.contains("\"hostname\":\"test\\\"box\""), "{state}");
         assert!(state.contains("\"sessions\":[{"), "{state}");
@@ -412,7 +562,7 @@ mod tests {
             cp.state = "flying".to_string(); // corrupt/foreign state
             cps.push(cp);
         }
-        let state = snapshot_to_state_json(&snap, &cps);
+        let state = snapshot_to_state_json(&snap, &cps, None);
         let rpos = state.find("\"resumable\":[").unwrap();
         let body = &state[rpos..];
         assert_eq!(body.matches("\"checkpoint_id\"").count(), RESUMABLE_CAP);

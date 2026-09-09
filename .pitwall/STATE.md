@@ -9,7 +9,10 @@
 - **M1 — Workspace/process discovery**: COMPLETE, pushed (`7f5ec34`).
 - **M2 — Local state**: COMPLETE, pushed (`5511eaa`).
 - **M3 — Omarchy panel prototype**: COMPLETE, pushed (`5a591d5` + polish `751c7d6`).
-- **M4 — Checkpoints + Resume**: COMPLETE (pending commit/push below).
+- **M4 — Checkpoints + Resume**: COMPLETE, pushed (`c76dea5`).
+- **M5a — Evidence/roles + agent discovery**: COMPLETE, pushed (`3f04f45`).
+- **M5c — Ephemeral AI workspace context**: COMPLETE, pushed (`99c6fae`).
+- **M5d Part 1 — Summary persistence + state v3**: COMPLETE (pending commit/push below).
 
 ## Completed work
 
@@ -282,7 +285,41 @@
 
 ## Exact next step
 
-- Commit + push M5c, then STOP (no M5d without instruction).
+## Completed work (M5d Part 1)
+
+- [x] `summaries` table (input_hash PK, text, model, created_at) + v3
+  additive migration (CREATE-IF-NOT-EXISTS; v2 rows preserved; v1
+  still recreates). Column set pinned by test (no evidence columns).
+- [x] `input_hash`: FNV over structured context only (terminal text
+  excluded by construction); same workspace → same hash.
+- [x] Cache-first `summarize`: lookup before staging/spawning; hit
+  prints cached text (stderr notes generated/cached); miss stores.
+- [x] state.json v3 `summary{text,model,created_at,input_hash,status}`;
+  `snapshot` carries latest cached summary; failures write short
+  fixed error states, never internals.
+- [x] StateReader accepts v1|v2|v3 + strict `summary` property (no
+  visuals — M5f). Panel verified visually unchanged on v3.
+- [x] Fixed a real bug found live: doubled top-level brace in v3
+  writer (caught by new whole-document well-formedness test, now
+  covering all artifacts).
+
+## Remaining work (next)
+
+- M5d Part 2 / M5e / M5f per approved plan. Awaiting instruction.
+  Do NOT start unapproved scope.
+
+## Tests performed (M5d Part 1, 2026-09-10)
+
+- `cargo fmt --check` clean; `cargo test --all` 96 passed; clippy
+  (--all-targets --all-features) clean.
+- Live: dry-run; free-tier generate (~16s) + cache behavior; v3 state
+  valid with ready summary; panel loads v3 with zero warnings;
+  screenshots inspected; schema verified (5 tables, no text columns).
+- Secret scan — clean (results at commit time).
+
+## Exact next step
+
+- Commit + push M5d Part 1, then STOP (no M5e/M5f without instruction).
 
 ## Completed work (M0 archive)
 

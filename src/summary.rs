@@ -31,6 +31,61 @@ situation, plus one short 'Needs attention' item ONLY when explicit \
 evidence supports it. Do not execute tasks. Do not modify files. Do not \
 attempt to continue the work. Analyze the supplied context only.";
 
+/// Deterministic cache key for a summary request: FNV-1a over the
+/// *structured* context only (session identity/role/project/agent/state,
+/// derived events, checkpoint refs). Terminal text is deliberately
+/// EXCLUDED — it is always fresh per request, and including it would make
+/// the cache never hit. Same effective workspace → same hash; any
+/// meaningful change → miss. Timestamps of the request itself are excluded.
+pub fn input_hash(
+    snapshot: &crate::collector::WorkspaceSnapshot,
+    events: &[crate::context::Event],
+    checkpoints: &[crate::store::Checkpoint],
+) -> String {
+    let mut buf = String::new();
+    buf.push_str(&format!("host={}\n", snapshot.hostname));
+    for s in &snapshot.sessions {
+        buf.push_str(&format!(
+            "sess={}|role={}|state={}|procs={}|last={}|",
+            s.id,
+            s.role.as_str(),
+            s.state.as_str(),
+            s.process_count,
+            s.last_activity_epoch
+        ));
+        match &s.project {
+            Some(p) => buf.push_str(&format!(
+                "proj={}|{}|repo={}|br={:?}|clean={:?}|\n",
+                p.id, p.dir, p.is_git_repo, p.branch, p.git_clean
+            )),
+            None => buf.push_str("proj=-\n"),
+        }
+        buf.push_str(&format!(
+            "agent={}|{}|\n",
+            s.agent.kind.as_str(),
+            s.agent.confidence.as_str()
+        ));
+    }
+    for e in events {
+        buf.push_str(&format!(
+            "ev={}|{}|{}|{}\n",
+            e.kind, e.session_id, e.project, e.detail
+        ));
+    }
+    for cp in checkpoints {
+        buf.push_str(&format!(
+            "cp={}|{}|{}|{:?}|{}|{}\n",
+            cp.id,
+            cp.project_id,
+            cp.session_id,
+            cp.branch,
+            cp.trigger,
+            cp.note.as_deref().unwrap_or("-")
+        ));
+    }
+    format!("fnv:{}", crate::ids::fnv1a_hex(&buf))
+}
+
 /// Default agent timeout (agent boot + inference).
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Truncation bound for the extracted summary text.
@@ -282,6 +337,29 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         bin
+    }
+
+    fn empty_snapshot() -> crate::collector::WorkspaceSnapshot {
+        crate::collector::WorkspaceSnapshot {
+            schema_version: 1,
+            collected_at_epoch: 1_700_000_100,
+            hostname: "testbox".to_string(),
+            sessions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn input_hash_is_deterministic_and_terminal_free() {
+        let snap = empty_snapshot();
+        let h1 = input_hash(&snap, &[], &[]);
+        let h2 = input_hash(&snap, &[], &[]);
+        assert_eq!(h1, h2);
+        assert!(h1.starts_with("fnv:"));
+        // Terminal text is not an input (no such field exists on the hash
+        // inputs by construction); structured change must alter the hash.
+        let mut snap2 = empty_snapshot();
+        snap2.hostname = "otherbox".to_string();
+        assert_ne!(h1, input_hash(&snap2, &[], &[]));
     }
 
     #[test]

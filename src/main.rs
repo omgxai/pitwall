@@ -97,6 +97,7 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
 
     let snapshot = collector::collect(&platform());
     let mut resumable: Vec<store::Checkpoint> = Vec::new();
+    let mut last_summary: Option<output::StateSummary> = None;
 
     // 1. Persist (degradable).
     match store::Store::open(&db) {
@@ -151,6 +152,21 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
                     eprintln!("pitwall snapshot: warning: checkpoint read failed ({e})");
                 }
             }
+            // Last cached summary for state.json v3 (degradable: absent).
+            match s.latest_summary() {
+                Ok(Some(row)) => {
+                    last_summary = Some(output::StateSummary::ready(
+                        row.text,
+                        row.model,
+                        row.created_at,
+                        row.input_hash,
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("pitwall snapshot: warning: summary read failed ({e})");
+                }
+            }
         }
         Err(store::StoreError::NewerVersion(v)) => {
             eprintln!(
@@ -165,7 +181,7 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
     // 2. Refresh the state.json artifact (degradable, preserves last good).
     match store::atomic_write(
         &state_file,
-        output::snapshot_to_state_json(&snapshot, &resumable).as_bytes(),
+        output::snapshot_to_state_json(&snapshot, &resumable, last_summary.as_ref()).as_bytes(),
     ) {
         Ok(()) => println!("snapshot: state artifact {}", state_file.display()),
         Err(e) => {
@@ -450,6 +466,62 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
     if truncated > 0 {
         eprintln!("pitwall summarize: note: {truncated} session(s) omitted from context");
     }
+    let input_hash = summary_mod::input_hash(&snapshot, &events, &checkpoints);
+    let data_path = data_dir.clone().unwrap_or_else(store::default_data_dir);
+    let state_path = data_path.join(store::STATE_FILENAME);
+
+    // Resumable entries + summary state for the state.json this command
+    // refreshes (same contract as `snapshot`; degradable throughout).
+    let resumable: Vec<store::Checkpoint>;
+    let state_summary: Option<output::StateSummary>;
+    let write_state = |resumable: &[store::Checkpoint], summary: Option<&output::StateSummary>| {
+        let payload = output::snapshot_to_state_json(&snapshot, resumable, summary);
+        match store::atomic_write(&state_path, payload.as_bytes()) {
+            Ok(()) => eprintln!("pitwall summarize: state artifact {}", state_path.display()),
+            Err(e) => eprintln!("pitwall summarize: warning: state artifact not written ({e})"),
+        }
+    };
+    let load_resumable = || -> Vec<store::Checkpoint> {
+        let db = data_path.join(store::DB_FILENAME);
+        let Ok(store) = store::Store::open(&db) else {
+            return Vec::new();
+        };
+        let Ok(cps) = store.latest_checkpoints(10) else {
+            return Vec::new();
+        };
+        let live: std::collections::HashSet<&str> =
+            snapshot.sessions.iter().map(|s| s.id.as_str()).collect();
+        cps.into_iter()
+            .filter(|c| !live.contains(c.session_id.as_str()))
+            .collect()
+    };
+
+    if dry_run {
+        println!("{document}");
+        return ExitCode::SUCCESS;
+    }
+
+    // Cache lookup BEFORE staging anything or spawning: identical
+    // structured context reuses the stored interpretation, no AI call.
+    let cached = (|| {
+        let db = data_path.join(store::DB_FILENAME);
+        let store = store::Store::open(&db).ok()?;
+        store.lookup_summary(&input_hash).ok()?
+    })();
+    if let Some(row) = cached {
+        eprintln!("pitwall summarize: cache hit ({})", row.input_hash);
+        resumable = load_resumable();
+        state_summary = Some(output::StateSummary::ready(
+            row.text.clone(),
+            row.model.clone(),
+            row.created_at,
+            row.input_hash.clone(),
+        ));
+        write_state(&resumable, state_summary.as_ref());
+        println!("{}", row.text);
+        return ExitCode::SUCCESS;
+    }
+
     let mut ctx = match pitwall_lib::context::EphemeralContext::create(&document) {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -457,11 +529,6 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if dry_run {
-        println!("{document}");
-        ctx.close();
-        return ExitCode::SUCCESS;
-    }
 
     // Working directory for the agent: explicit override, else the most
     // recent terminal project, else the current directory. Validated.
@@ -523,14 +590,50 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
             ctx.close();
             if text.is_empty() {
                 eprintln!("pitwall summarize: agent returned no usable text");
+                resumable = load_resumable();
+                state_summary = Some(output::StateSummary::error("no usable text"));
+                write_state(&resumable, state_summary.as_ref());
                 return ExitCode::from(1);
             }
+            // Persist final text + minimal metadata (never the context).
+            let now = now_epoch();
+            let db = data_path.join(store::DB_FILENAME);
+            match store::Store::open(&db) {
+                Ok(store) => {
+                    if let Err(e) = store.store_summary(&input_hash, &text, model.as_deref(), now) {
+                        eprintln!("pitwall summarize: warning: cache store failed ({e})");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("pitwall summarize: warning: store unavailable ({e})");
+                }
+            }
+            eprintln!("pitwall summarize: generated ({input_hash})");
+            resumable = load_resumable();
+            state_summary = Some(output::StateSummary::ready(
+                text.clone(),
+                model.clone(),
+                now,
+                input_hash.clone(),
+            ));
+            write_state(&resumable, state_summary.as_ref());
             println!("{text}");
             ExitCode::SUCCESS
         }
         Err(e) => {
+            // Fixed short failure classes only — never agent internals.
+            let short = if e.contains("timed out") {
+                "timeout"
+            } else if e.contains("not found") || e.contains("spawn failed") {
+                "agent unavailable"
+            } else {
+                "agent error"
+            };
             eprintln!("pitwall summarize: {e}");
             ctx.close();
+            resumable = load_resumable();
+            state_summary = Some(output::StateSummary::error(short));
+            write_state(&resumable, state_summary.as_ref());
             ExitCode::from(1)
         }
     }
