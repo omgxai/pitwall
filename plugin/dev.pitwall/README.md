@@ -8,6 +8,8 @@ all detection lives in the Rust daemon/CLI, never in QML.
 | File | Role |
 |---|---|
 | `manifest.json` | Plugin contract (`bar-widget`, id `dev.pitwall`) |
+| `SessionBar.qml` | Timeline bar: label + duration track + history segments |
+| (removed M5f) | `ActivityStrip`, `SessionHero`, `SessionRow`, `ResumableRow`, `StateDot` — replaced by the rail + toast |
 | `Widget.qml` | Entry point: bar indicator + popup, Focus action |
 | `StateReader.qml` | Watched `FileView` → validated `record` (null on missing/malformed) |
 | `SessionHero.qml` | Primary session hero (`PanelHero` + Focus button) |
@@ -77,6 +79,9 @@ omarchy plugin enable dev.pitwall --section right   # first time only
 journalctl --user -t omarchy-shell --since "1 minute ago" | grep -i pitwall
 # drive the panel without clicking:
 omarchy-shell dev.pitwall toggle
+# keyboard toggle (add to your Omarchy bindings; plugins must not bind
+# global keys themselves):
+#   omarchy-shell dev.pitwall toggle
 ```
 
 Needs `state.json` present: run `pitwall snapshot` (or wait for the timer).

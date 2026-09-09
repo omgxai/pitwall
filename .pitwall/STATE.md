@@ -13,7 +13,8 @@
 - **M5a — Evidence/roles + agent discovery**: COMPLETE, pushed (`3f04f45`).
 - **M5c — Ephemeral AI workspace context**: COMPLETE, pushed (`99c6fae`).
 - **M5d Part 1 — Summary persistence + state v3**: COMPLETE, pushed (`41aaa03`).
-- **M5e — Pixel flag identity**: COMPLETE (pending commit/push below).
+- **M5e — Pixel flag identity**: COMPLETE, pushed (`63a85e8`).
+- **M5f — Session timeline rail**: COMPLETE (pending commit/push below).
 
 ## Completed work
 
@@ -339,9 +340,46 @@
 - `cargo fmt --check` clean; 96 tests passed; clippy clean.
 - Asset pixel dump + live screenshots inspected; secret scan clean.
 
+## Completed work (M5f)
+
+- [x] Rail UI: collapsed flag-only button; header (flag + PIT/WALL +
+  gear); AI summary ticker (ping-pong, hover-pause, Generate/error
+  states); session bars (log-scaled duration, R/S/U segments, recency
+  order); hover-preview + pinned toast with deterministic detail;
+  actions (Focus/Stop-SIGTERM/Close/Resume) on explicit clicks only.
+- [x] Settings view: Agent/Model Dropdowns + Summary Toggle, persisted
+  via `pitwall config` + state.json echo; models listed per agent.
+- [x] Backend: session age/history/root_pid in state.json; minimal
+  `config.rs` + `pitwall config get/set`; resumable short-hash display.
+- [x] Removed replaced components (ActivityStrip/Hero/rows/StateDot).
+- [x] Crash notification during testing investigated: restart-teardown
+  artifact (SI_TKILL on old shell), not a QML bug; current shell healthy.
+
+## Remaining work (next)
+
+- M5g hardening/release per approved plan. Awaiting instruction.
+  Do NOT start unapproved scope.
+
+## Known problems / limits (M5f)
+
+- Physical click/tap not performed headlessly (no input tool); all
+  click paths reviewed + CLI equivalents proven live (focus, resume,
+  SIGTERM argv, config set). Recommend manual click-through.
+- 6+ sessions, vertical bar, ticker pause-on-hover: code-reviewed,
+  untested live (max 3 sessions observed).
+- No OS reduced-motion signal on this stack; mitigation is slow
+  speeds + hover pause + toggle-gated summary.
+
+## Tests performed (M5f, 2026-09-10)
+
+- `cargo fmt --check` clean; 103 tests passed; clippy clean.
+- Live: collapsed/expanded/ticker/bars/toast/RESUME screenshots;
+  zero QML errors; resume/focus/stop-argv/config proven via CLI;
+  schema verified (5 tables + summaries, no text columns).
+
 ## Exact next step
 
-- Commit + push M5e, then STOP (no M5f without instruction).
+- Commit + push M5f, then STOP (no M5g without instruction).
 
 ## Completed work (M0 archive)
 

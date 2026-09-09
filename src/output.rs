@@ -6,6 +6,26 @@
 
 use crate::collector::WorkspaceSnapshot;
 use crate::store::Checkpoint;
+use std::collections::HashMap;
+
+/// Config echo for state.json: the *effective* user choices the panel
+/// displays and acts on (agent/model/summary toggle). Rendered from the
+/// config file at state-write time; defaults when unconfigured.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConfigEcho {
+    pub agent: String,
+    pub model: String,
+    pub summary_enabled: bool,
+}
+
+/// Per-session enrichment for timeline bars, computed from retained
+/// observations (observed duration + state history). Absent map entries
+/// render as unknown/empty — never invented.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionMeta {
+    pub age_secs: Option<i64>,
+    pub history: String,
+}
 
 /// Escape a string for JSON double-quote embedding.
 pub fn escape(s: &str) -> String {
@@ -239,14 +259,19 @@ pub fn snapshot_to_state_json(
     s: &WorkspaceSnapshot,
     resumable: &[Checkpoint],
     summary: Option<&StateSummary>,
+    meta: &HashMap<String, SessionMeta>,
+    config: &ConfigEcho,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "{{\"state_version\":{},\"collected_at\":{},\"hostname\":{},\"session_count\":{},\"sessions\":[",
+        "{{\"state_version\":{},\"collected_at\":{},\"hostname\":{},\"session_count\":{},\"config\":{{\"agent\":{},\"model\":{},\"summary_enabled\":{}}},\"sessions\":[",
         STATE_SCHEMA_VERSION,
         s.collected_at_epoch,
         q(&s.hostname),
-        s.sessions.len()
+        s.sessions.len(),
+        q(&config.agent),
+        q(&config.model),
+        config.summary_enabled
     ));
     for (i, sess) in s.sessions.iter().enumerate() {
         if i > 0 {
@@ -272,8 +297,10 @@ pub fn snapshot_to_state_json(
                 q(&w.workspace)
             )
         });
+        // Timeline enrichment (additive; unknown when unobserved).
+        let meta_entry = meta.get(&sess.id);
         out.push_str(&format!(
-            "{{\"id\":{},\"state\":{},\"process_count\":{},\"project\":{},\"agent\":{{\"kind\":{},\"confidence\":{}}},\"window\":{},\"last_activity\":{{\"epoch\":{},\"kind\":{}}},\"summary\":{},\"role\":{}}}",
+            "{{\"id\":{},\"state\":{},\"process_count\":{},\"project\":{},\"agent\":{{\"kind\":{},\"confidence\":{}}},\"window\":{},\"last_activity\":{{\"epoch\":{},\"kind\":{}}},\"summary\":{},\"role\":{},\"age_secs\":{},\"history\":{},\"root_pid\":{}}}",
             q(&sess.id),
             q(sess.state.as_str()),
             sess.process_count,
@@ -284,7 +311,10 @@ pub fn snapshot_to_state_json(
             sess.last_activity_epoch,
             q(sess.last_activity_kind),
             q(&sess.summary),
-            q(sess.role.as_str())
+            q(sess.role.as_str()),
+            meta_entry.and_then(|m| m.age_secs).map_or("null".to_string(), |a| a.to_string()),
+            q(meta_entry.map(|m| m.history.as_str()).unwrap_or("")),
+            sess.root_pid
         ));
     }
     out.push_str("],\"resumable\":[");
@@ -409,7 +439,8 @@ mod tests {
         let mut snap = sample_snapshot();
         snap.sessions[0].processes[0].command = "opencode --token hunter2-supersecret".to_string();
         snap.sessions[0].agent.evidence = vec!["cmd:opencode (pid 10)".to_string()];
-        let state = snapshot_to_state_json(&snap, &[], None);
+        let state =
+            snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &ConfigEcho::default());
         assert!(state.starts_with("{\"state_version\":3"), "{state}");
         assert!(state.contains("\"summary\":"), "{state}");
         assert!(state.contains("\"resumable\":[]"), "{state}");
@@ -438,7 +469,13 @@ mod tests {
             1_700_000_300,
             "fnv:abc123".to_string(),
         );
-        let state = snapshot_to_state_json(&snap, &[], Some(&sum));
+        let state = snapshot_to_state_json(
+            &snap,
+            &[],
+            Some(&sum),
+            &HashMap::new(),
+            &ConfigEcho::default(),
+        );
         assert!(
             state.contains("\"summary\":{\"text\":\"All quiet.\""),
             "{state}"
@@ -452,7 +489,13 @@ mod tests {
     fn state_v3_error_state_is_short_and_safe() {
         let snap = sample_snapshot();
         let sum = StateSummary::error("timeout");
-        let state = snapshot_to_state_json(&snap, &[], Some(&sum));
+        let state = snapshot_to_state_json(
+            &snap,
+            &[],
+            Some(&sum),
+            &HashMap::new(),
+            &ConfigEcho::default(),
+        );
         assert!(state.contains("\"status\":\"error\""), "{state}");
         assert!(state.contains("\"message\":\"timeout\""), "{state}");
         assert!(state.contains("\"text\":\"\""), "{state}");
@@ -492,20 +535,79 @@ mod tests {
         let cps = vec![sample_checkpoint(1, "sess_x")];
         let sum = StateSummary::ready("Hi.".to_string(), None, 1, "fnv:1".to_string());
         assert_well_formed(&snapshot_to_json(&snap));
-        assert_well_formed(&snapshot_to_state_json(&snap, &[], None));
-        assert_well_formed(&snapshot_to_state_json(&snap, &cps, None));
-        assert_well_formed(&snapshot_to_state_json(&snap, &cps, Some(&sum)));
+        assert_well_formed(&snapshot_to_state_json(
+            &snap,
+            &[],
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+        ));
+        assert_well_formed(&snapshot_to_state_json(
+            &snap,
+            &cps,
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+        ));
+        assert_well_formed(&snapshot_to_state_json(
+            &snap,
+            &cps,
+            Some(&sum),
+            &HashMap::new(),
+            &ConfigEcho::default(),
+        ));
         assert_well_formed(&snapshot_to_state_json(
             &snap,
             &cps,
             Some(&StateSummary::error("timeout")),
+            &HashMap::new(),
+            &ConfigEcho::default(),
         ));
+    }
+
+    #[test]
+    fn timeline_fields_come_from_meta_or_unknown() {
+        let snap = sample_snapshot();
+        // No meta: unknown age, empty history, real root pid.
+        let bare =
+            snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &ConfigEcho::default());
+        assert!(bare.contains("\"age_secs\":null"), "{bare}");
+        assert!(bare.contains("\"history\":\"\""), "{bare}");
+        assert!(bare.contains("\"root_pid\":10"), "{bare}");
+        // With meta: rendered verbatim.
+        let mut meta = HashMap::new();
+        meta.insert(
+            "sess_abc".to_string(),
+            SessionMeta {
+                age_secs: Some(3600),
+                history: "RRS".to_string(),
+            },
+        );
+        let enriched = snapshot_to_state_json(&snap, &[], None, &meta, &ConfigEcho::default());
+        assert!(enriched.contains("\"age_secs\":3600"), "{enriched}");
+        assert!(enriched.contains("\"history\":\"RRS\""), "{enriched}");
+        assert_well_formed(&enriched);
+    }
+
+    #[test]
+    fn config_echo_renders_effective_choices() {
+        let snap = sample_snapshot();
+        let cfg = ConfigEcho {
+            agent: "codex".to_string(),
+            model: "prov/m".to_string(),
+            summary_enabled: false,
+        };
+        let state = snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &cfg);
+        assert!(state.contains("\"config\":{\"agent\":\"codex\""), "{state}");
+        assert!(state.contains("\"summary_enabled\":false"), "{state}");
+        assert_well_formed(&state);
     }
 
     #[test]
     fn state_v3_absent_summary_is_null() {
         let snap = sample_snapshot();
-        let state = snapshot_to_state_json(&snap, &[], None);
+        let state =
+            snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &ConfigEcho::default());
         assert!(state.contains("\"summary\":null"), "{state}");
     }
 
@@ -537,7 +639,8 @@ mod tests {
             sample_checkpoint(2, "sess_old"),
             sample_checkpoint(1, "sess_older"),
         ];
-        let state = snapshot_to_state_json(&snap, &cps, None);
+        let state =
+            snapshot_to_state_json(&snap, &cps, None, &HashMap::new(), &ConfigEcho::default());
         // v1 shape intact (newest-first resumable is purely additive).
         assert!(state.contains("\"hostname\":\"test\\\"box\""), "{state}");
         assert!(state.contains("\"sessions\":[{"), "{state}");
@@ -562,7 +665,8 @@ mod tests {
             cp.state = "flying".to_string(); // corrupt/foreign state
             cps.push(cp);
         }
-        let state = snapshot_to_state_json(&snap, &cps, None);
+        let state =
+            snapshot_to_state_json(&snap, &cps, None, &HashMap::new(), &ConfigEcho::default());
         let rpos = state.find("\"resumable\":[").unwrap();
         let body = &state[rpos..];
         assert_eq!(body.matches("\"checkpoint_id\"").count(), RESUMABLE_CAP);

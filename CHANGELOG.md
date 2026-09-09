@@ -7,6 +7,11 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M5f session timeline rail: collapsed flag button; header + gear;
+  AI summary ticker; duration/history bars newest-first; hover/pin
+  toast with deterministic detail; Focus/Stop/Resume/Close actions;
+  settings (agent/model/toggle) via `pitwall config`; session age,
+  history, root_pid in state.json.
 - M5e pixel flag identity: original 16x16 checkered `assets/flag.svg`
   (+ 64px PNG), 14px panel header mark with wordmark fallback,
   screenshot-verified, no layout/semantics changes.

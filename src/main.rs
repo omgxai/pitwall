@@ -38,6 +38,7 @@ fn print_help() {
     println!("    agents           List supported AI agents and detection status");
     println!("    models           List models for an agent (--agent ID, default opencode)");
     println!("    summarize        Ask the configured agent for a workspace summary");
+    println!("    config             Get/set user configuration (get [key] | set <key> <value>)");
     println!("                     [--agent ID] [--model P/M] [--dir DIR]");
     println!("                     [--timeout SECS] [--dry-run] [--data-dir DIR]");
 }
@@ -65,6 +66,102 @@ fn cmd_status(json: bool) -> ExitCode {
 /// Collect one observation, persist it (hash-gated), and refresh the
 /// `state.json` artifact. Every failure degrades to a warning: persistence
 /// must never make observation fail.
+/// Timeline enrichment for state.json: observed age + state history per
+/// live session, read from retained observations. Degradable: failures
+/// yield an empty map (fields render unknown, never invented).
+fn session_meta_map(
+    store: &store::Store,
+    snapshot: &collector::WorkspaceSnapshot,
+) -> std::collections::HashMap<String, output::SessionMeta> {
+    let mut map = std::collections::HashMap::new();
+    for s in &snapshot.sessions {
+        let age_secs = store
+            .session_first_seen(&s.id)
+            .ok()
+            .flatten()
+            .map(|first| snapshot.collected_at_epoch.saturating_sub(first).max(0));
+        let history = store.session_history(&s.id, 16).unwrap_or_default();
+        map.insert(s.id.clone(), output::SessionMeta { age_secs, history });
+    }
+    map
+}
+
+/// Effective user config for state echo and CLI defaults. Reads the
+/// config file; missing/unreadable files yield defaults (panel always
+/// works, settings show defaults).
+fn load_config_echo() -> output::ConfigEcho {
+    let cfg = pitwall_lib::config::load_from(&pitwall_lib::config::config_path());
+    output::ConfigEcho {
+        agent: cfg.agent,
+        model: cfg.model,
+        summary_enabled: cfg.summary_enabled,
+    }
+}
+
+/// Minimal config get/set (`pitwall config get [key]`, `pitwall config set
+/// key value`). Only known keys; values validated. The settings popup and
+/// power users share this path — QML never writes files directly.
+fn cmd_config(args: &[String]) -> ExitCode {
+    use pitwall_lib::config as config_mod;
+    let path = config_mod::config_path();
+    match args.first().map(String::as_str) {
+        Some("get") => {
+            let cfg = config_mod::load_from(&path);
+            match args.get(1) {
+                None => {
+                    print!("{}", cfg.serialize());
+                    ExitCode::SUCCESS
+                }
+                Some(key) => match key.as_str() {
+                    "agent" => {
+                        println!("{}", cfg.agent);
+                        ExitCode::SUCCESS
+                    }
+                    "model" => {
+                        println!("{}", cfg.model);
+                        ExitCode::SUCCESS
+                    }
+                    "summary_enabled" => {
+                        println!("{}", cfg.summary_enabled);
+                        ExitCode::SUCCESS
+                    }
+                    _ => {
+                        eprintln!("pitwall config: unknown key '{key}'");
+                        ExitCode::from(2)
+                    }
+                },
+            }
+        }
+        Some("set") => {
+            let (Some(key), Some(value)) = (args.get(1), args.get(2)) else {
+                eprintln!("pitwall config: usage: pitwall config set <key> <value>");
+                return ExitCode::from(2);
+            };
+            let mut cfg = config_mod::load_from(&path);
+            match cfg.set(key, value) {
+                Ok(()) => match config_mod::save_to(&path, &cfg) {
+                    Ok(()) => {
+                        println!("config: {key} updated");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("pitwall config: {e}");
+                        ExitCode::from(1)
+                    }
+                },
+                Err(e) => {
+                    eprintln!("pitwall config: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        _ => {
+            eprintln!("pitwall config: usage: pitwall config (get [key] | set <key> <value>)");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn cmd_snapshot(args: &[String]) -> ExitCode {
     let mut db_path: Option<PathBuf> = None;
     let mut state_path: Option<PathBuf> = None;
@@ -98,6 +195,8 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
     let snapshot = collector::collect(&platform());
     let mut resumable: Vec<store::Checkpoint> = Vec::new();
     let mut last_summary: Option<output::StateSummary> = None;
+    let mut meta: std::collections::HashMap<String, output::SessionMeta> =
+        std::collections::HashMap::new();
 
     // 1. Persist (degradable).
     match store::Store::open(&db) {
@@ -152,6 +251,8 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
                     eprintln!("pitwall snapshot: warning: checkpoint read failed ({e})");
                 }
             }
+            // Timeline enrichment + last cached summary (degradable).
+            meta = session_meta_map(&s, &snapshot);
             // Last cached summary for state.json v3 (degradable: absent).
             match s.latest_summary() {
                 Ok(Some(row)) => {
@@ -181,7 +282,14 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
     // 2. Refresh the state.json artifact (degradable, preserves last good).
     match store::atomic_write(
         &state_file,
-        output::snapshot_to_state_json(&snapshot, &resumable, last_summary.as_ref()).as_bytes(),
+        output::snapshot_to_state_json(
+            &snapshot,
+            &resumable,
+            last_summary.as_ref(),
+            &meta,
+            &load_config_echo(),
+        )
+        .as_bytes(),
     ) {
         Ok(()) => println!("snapshot: state artifact {}", state_file.display()),
         Err(e) => {
@@ -475,7 +583,20 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
     let resumable: Vec<store::Checkpoint>;
     let state_summary: Option<output::StateSummary>;
     let write_state = |resumable: &[store::Checkpoint], summary: Option<&output::StateSummary>| {
-        let payload = output::snapshot_to_state_json(&snapshot, resumable, summary);
+        // Timeline enrichment for the artifact (degradable: unknown fields).
+        let meta = (|| {
+            let db = data_path.join(store::DB_FILENAME);
+            let store = store::Store::open(&db).ok()?;
+            Some(session_meta_map(&store, &snapshot))
+        })()
+        .unwrap_or_default();
+        let payload = output::snapshot_to_state_json(
+            &snapshot,
+            resumable,
+            summary,
+            &meta,
+            &load_config_echo(),
+        );
         match store::atomic_write(&state_path, payload.as_bytes()) {
             Ok(()) => eprintln!("pitwall summarize: state artifact {}", state_path.display()),
             Err(e) => eprintln!("pitwall summarize: warning: state artifact not written ({e})"),
@@ -672,6 +793,7 @@ fn main() -> ExitCode {
         Some("agents") => cmd_agents(),
         Some("models") => cmd_models(&args[1..]),
         Some("summarize") => cmd_summarize(&args[1..]),
+        Some("config") => cmd_config(&args[1..]),
         Some(other) => {
             eprintln!("pitwall: unknown subcommand '{other}'. Run `pitwall --help`.");
             ExitCode::from(2)

@@ -6,6 +6,7 @@
 
 pub mod agents;
 pub mod collector;
+pub mod config;
 pub mod context;
 pub mod ids;
 pub mod output;

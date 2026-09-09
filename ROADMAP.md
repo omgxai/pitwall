@@ -24,7 +24,8 @@ until M(n) is stable and committed.
   no cloud, no autonomous behavior. In progress (M5a + M5c done; M5b
   events folded into M5c as read-time derivation; M5d Part 1 adds
   the summaries cache + state.json v3 contract (no UI yet); M5e adds
-  the pixel-flag identity (no UI redesign).
+  the pixel-flag identity (no UI redesign); M5f rebuilds the panel
+  as a session timeline (rail + ticker + toast + settings).
 - [ ] **M6 — Packaging + first public release**: `install.sh`, docs pass,
   clean-room install verified, v0.1.0 tag.
 

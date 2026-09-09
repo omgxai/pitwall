@@ -916,6 +916,55 @@ pub struct PrevSession {
 }
 
 impl Store {
+    /// First-seen epoch for a session across retained observations
+    /// (observed duration basis for timeline bars). `None` when the session
+    /// appears only in no retained observation (e.g. brand-new live data).
+    pub fn session_first_seen(&self, session_id: &str) -> Result<Option<i64>, StoreError> {
+        let at: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(o.collected_at) FROM observations o
+                 JOIN sessions s ON s.observation_id = o.id
+                 WHERE s.session_id = ?1",
+                rusqlite::params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)?;
+        Ok(at)
+    }
+
+    /// Recent observed states for a session, oldest→newest, one char per
+    /// retained observation (cap `limit`): R running, S sleeping/stopped
+    /// (non-running but present), U unknown, . absent-from-sample is NOT
+    /// emitted (only observations containing the session are sampled, so
+    /// every char is real evidence, never filler).
+    pub fn session_history(&self, session_id: &str, limit: i64) -> Result<String, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.state FROM sessions s
+                 JOIN observations o ON o.id = s.observation_id
+                 WHERE s.session_id = ?1
+                 ORDER BY o.id DESC LIMIT ?2",
+            )
+            .map_err(StoreError::from)?;
+        let mut states: Vec<String> = stmt
+            .query_map(rusqlite::params![session_id, limit], |row| row.get(0))
+            .map_err(StoreError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?;
+        states.reverse();
+        let out: String = states
+            .iter()
+            .map(|s| match s.as_str() {
+                "running" => 'R',
+                "sleeping" | "stopped" => 'S',
+                _ => 'U',
+            })
+            .collect();
+        Ok(out)
+    }
+
     /// Newest retained observation `(id, collected_at)`, if any.
     pub fn latest_observation(&self) -> Result<Option<(i64, i64)>, StoreError> {
         let row: Option<(i64, i64)> = self
@@ -1530,6 +1579,37 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(cols, vec!["input_hash", "text", "model", "created_at"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_first_seen_and_history() {
+        let dir = test_dir("hist");
+        let mut store = Store::open(&dir.join("pitwall.db")).unwrap();
+        assert_eq!(store.session_first_seen("sess_nope").unwrap(), None);
+        assert_eq!(store.session_history("sess_nope", 16).unwrap(), "");
+        // Two observations with known states (bypass collect via persist).
+        let mut snap1 = sample_snapshot();
+        snap1.collected_at_epoch = 1000;
+        snap1.sessions[0].id = "sess_h".to_string();
+        snap1.sessions[0].state = SessionState::Sleeping;
+        let obs1 = match store.persist(&snap1).unwrap() {
+            PersistOutcome::Written { observation_id } => observation_id,
+            PersistOutcome::Unchanged => panic!("must write"),
+        };
+        let mut snap2 = sample_snapshot();
+        snap2.collected_at_epoch = 2000;
+        snap2.sessions[0].id = "sess_h".to_string();
+        snap2.sessions[0].state = SessionState::Running;
+        snap2.sessions[0].process_count = 5;
+        let _ = match store.persist(&snap2).unwrap() {
+            PersistOutcome::Written { observation_id } => observation_id,
+            PersistOutcome::Unchanged => panic!("must write"),
+        };
+        assert_eq!(store.session_first_seen("sess_h").unwrap(), Some(1000));
+        assert_eq!(store.session_history("sess_h", 16).unwrap(), "SR");
+        assert_eq!(store.session_history("sess_h", 1).unwrap(), "R");
+        let _ = obs1;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
