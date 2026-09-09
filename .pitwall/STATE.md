@@ -17,7 +17,8 @@
 - **M5f — Session timeline rail**: COMPLETE, pushed (`09106f9` + polish `b193021`).
 - **M5f final polish — rail UX freeze**: COMPLETE, pushed (`c57e6f9`).
 - **Docs governance — public roadmap + AI workforce**: COMPLETE (pending commit/push below).
-- **Dogfood wave 1 — real child agents**: COMPLETE (pending commit/push below).
+- **Dogfood wave 1 — real child agents**: COMPLETE, pushed (`99e1d0d`).
+- **M5g tree/grouping — semantic rail**: COMPLETE (pending commit/push below).
 - **PRE established**: Race Engineer online 2026-09-10; coordination
   files created (`agent_master.md`, child stories, `.agents/`).
 

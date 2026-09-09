@@ -7,6 +7,10 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M5g semantic tree: tier/group presentation fields (pitwall-native >
+  agents > workspace > system), project-grouped rail with collapse,
+  /proc-/sys-/dev-cwd exclusion fix, resumable confidence display.
+  Identity and schema unchanged (additive fields only).
 - Docs governance: disciplined public roadmap (M5 frozen, hardening +
   AI Workforce/Recipes directions), refreshed README, new
   `docs/AI_WORKFORCE.md` + `docs/RECIPES.md`, corrected security

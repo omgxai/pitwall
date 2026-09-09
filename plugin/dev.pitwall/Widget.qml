@@ -646,77 +646,184 @@ Panel {
               }
             }
 
-            // ---- session rail (newest first) ----
+            // ---- grouped workspace rail ----
+            // Semantic priority first (tier order fixed), recency within.
+            // Groups key on shared project id; unprojected entries stand
+            // alone under their own session id. Identity untouched:
+            // grouping is presentation over stable sess_*/proj_* ids.
+            // Collapse state is per group key; geometry stays in-flow.
             Repeater {
-              model: root.liveSessions
-              delegate: SessionBar {
+              model: root.railGroups
+              delegate: Column {
                 width: column.width
-                entry: modelData
-                resumable: false
-                frac: root.barFrac(modelData.age_secs)
-                selected: root.selectedId === modelData.id
-                dimmed: root.selectedId !== "" && root.selectedId !== modelData.id
-                showCard: root.selectedId === modelData.id
-                detailText: root.detailFor(modelData, false)
-                canFocus: true
-                canStop: true
-                canClose: true
-                canResume: false
-                onClicked: {
-                  var id = modelData.id
-                  root.selectedId = (root.selectedId === id) ? "" : id
-                }
-                onHovered: function(h) {
-                  root.hoveredId = h ? modelData.id : ""
-                }
-                onFocusRequested: root.focusSession(modelData)
-                onStopRequested: root.stopSession(modelData)
-                onCloseRequested: root.closeSession(modelData)
-              }
-            }
+                spacing: Style.space(4)
+                visible: modelData.visible
 
-            // ---- resumable history rail (same language, muted) ----
-            Repeater {
-              model: Math.min(root.resumable.length, 5)
-              delegate: SessionBar {
-                width: column.width
-                entry: root.resumable[index]
-                resumable: true
-                frac: 0.25
-                selected: root.selectedId === ("r:" + root.resumable[index].session_id)
-                dimmed: root.selectedId !== "" && root.selectedId !== ("r:" + root.resumable[index].session_id)
-                showCard: root.selectedId === ("r:" + root.resumable[index].session_id)
-                detailText: root.detailFor(root.resumable[index], true)
-                canFocus: false
-                canStop: false
-                canClose: false
-                canResume: true
-                resumeTooltip: root.resumeTooltipFor(root.resumable[index])
-                onClicked: {
-                  var sid = "r:" + root.resumable[index].session_id
-                  root.selectedId = (root.selectedId === sid) ? "" : sid
+                Text {
+                  visible: modelData.kind === "tier"
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: modelData.label
+                  color: Qt.darker(Color.foreground, 1.6)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  renderType: Text.NativeRendering
                 }
-                onHovered: function(h) {
-                  root.hoveredId = h ? ("r:" + root.resumable[index].session_id) : ""
-                }
-                onResumeRequested: root.resumeCheckpoint(String(root.resumable[index].session_id || ""))
-              }
-            }
 
-            Text {
-              visible: root.resumable.length > 5
-              width: parent.width
-              textFormat: Text.PlainText
-              text: "+" + (root.resumable.length - 5) + " more checkpoints"
-              color: Qt.darker(Color.foreground, 1.4)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              renderType: Text.NativeRendering
+                Item {
+                  visible: modelData.kind === "group"
+                  width: parent.width
+                  height: Style.font.bodySmall + Style.space(4)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.right: toggleGlyph.left
+                    anchors.rightMargin: Style.space(4)
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideRight
+                    text: modelData.label
+                    color: Color.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    renderType: Text.NativeRendering
+                  }
+
+                  Text {
+                    id: toggleGlyph
+                    textFormat: Text.PlainText
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: modelData.collapsed ? "▴" : "▾"
+                    color: Qt.darker(Color.foreground, 1.4)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    renderType: Text.NativeRendering
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.toggleGroup(modelData.key)
+                  }
+                }
+
+                Repeater {
+                  model: (modelData.kind === "group" && !modelData.collapsed) ? modelData.entries : []
+                  delegate: SessionBar {
+                    width: column.width
+                    entry: modelData.ref
+                    resumable: modelData.hist
+                    frac: modelData.hist ? 0.25 : root.barFrac(modelData.ref.age_secs)
+                    selected: root.selectedId === modelData.selId
+                    dimmed: root.selectedId !== "" && root.selectedId !== modelData.selId
+                    showCard: root.selectedId === modelData.selId
+                    detailText: modelData.hist ? root.detailFor(modelData.ref, true) : root.detailFor(modelData.ref, false)
+                    canFocus: !modelData.hist
+                    canStop: !modelData.hist
+                    canClose: !modelData.hist
+                    canResume: modelData.hist
+                    resumeTooltip: modelData.hist ? root.resumeTooltipFor(modelData.ref) : ""
+                    onClicked: {
+                      root.selectedId = (root.selectedId === modelData.selId) ? "" : modelData.selId
+                    }
+                    onHovered: function(h) {
+                      root.hoveredId = h ? modelData.selId : ""
+                    }
+                    onFocusRequested: root.focusSession(modelData.ref)
+                    onStopRequested: root.stopSession(modelData.ref)
+                    onCloseRequested: root.closeSession(modelData.ref)
+                    onResumeRequested: root.resumeCheckpoint(String(modelData.ref.session_id || ""))
+                  }
+                }
+              }
             }
           }
         }
       }
     }
+  }
+
+  // ---- grouped rail model ----
+  // Tier order is fixed (semantic priority); recency rules inside each
+  // tier via the pre-sorted live/resumable arrays. Groups key on shared
+  // project id, singletons on their own id. Collapsed state is a plain
+  // object keyed by group key (reassigned wholesale so bindings fire).
+  property var collapsedGroups: ({})
+  readonly property var tierOrder: ["pitwall-native", "agents", "workspace", "system"]
+  readonly property var tierLabels: ({
+    "pitwall-native": "PITWALL-NATIVE",
+    "agents": "AGENTS",
+    "workspace": "WORKSPACE",
+    "system": "SYSTEM"
+  })
+
+  function toggleGroup(key) {
+    var next = {}
+    for (var k in collapsedGroups) next[k] = collapsedGroups[k]
+    next[key] = !next[key]
+    collapsedGroups = next
+  }
+
+  function groupDisplayName(entries) {
+    if (entries.length === 0) return ""
+    var ref0 = entries[0].ref
+    var name = ref0.project_name || (ref0.project && ref0.project.name) || "session"
+    if (entries.length === 1) return String(name)
+    return String(name) + " \u00b7 " + entries.length
+  }
+
+  readonly property var railGroups: {
+    var out = []
+    var live = liveSessions
+    var hist = resumable.slice(0, 5)
+    var groups = {}
+    var order = []
+    var i, s, gkey
+    for (i = 0; i < live.length; i++) {
+      s = live[i] || {}
+      gkey = String(s.group || s.id || ("live-" + i))
+      if (!groups[gkey]) {
+        groups[gkey] = { key: gkey, tier: String(s.tier || "workspace"), live: [], hist: [] }
+        order.push(gkey)
+      }
+      groups[gkey].live.push(s)
+    }
+    for (i = 0; i < hist.length; i++) {
+      var c = hist[i] || {}
+      gkey = String(c.group || ("hist-" + String(c.session_id || i)))
+      if (!groups[gkey]) {
+        groups[gkey] = { key: gkey, tier: String(c.tier || "workspace"), live: [], hist: [] }
+        order.push(gkey)
+      }
+      groups[gkey].hist.push(c)
+    }
+    var t, k, g, entries, collapsed
+    for (var ti = 0; ti < tierOrder.length; ti++) {
+      t = tierOrder[ti]
+      var tierGroups = []
+      for (var oi = 0; oi < order.length; oi++) {
+        k = order[oi]
+        g = groups[k]
+        if (g.tier !== t) continue
+        entries = []
+        for (var li = 0; li < g.live.length; li++) {
+          entries.push({ kind: "live", hist: false, ref: g.live[li], selId: String(g.live[li].id || "") })
+        }
+        for (var hi = 0; hi < g.hist.length; hi++) {
+          entries.push({ kind: "hist", hist: true, ref: g.hist[hi], selId: "r:" + String(g.hist[hi].session_id || "") })
+        }
+        if (entries.length === 0) continue
+        collapsed = !!collapsedGroups[g.key]
+        tierGroups.push({ kind: "group", key: g.key, label: groupDisplayName(entries), collapsed: collapsed, entries: collapsed ? [] : entries })
+      }
+      if (tierGroups.length === 0) continue
+      out.push({ kind: "tier", label: tierLabels[t] || t, visible: true })
+      for (var gi = 0; gi < tierGroups.length; gi++) out.push(tierGroups[gi])
+    }
+    return out
   }
 
   // ---- selection model: pinned clicks only. Hover highlights bars

@@ -255,6 +255,38 @@ fn project_basename(dir: &str) -> &str {
 }
 
 /// Render a snapshot as the `state.json` artifact (state schema v2).
+/// Display tier for presentation grouping (semantic priority, NOT identity).
+/// Order is fixed downstream: pitwall-native > agents > workspace > system.
+/// `pitwall-native` is a documented name heuristic for this product's home
+/// project (gracefully empty for other users, who start at agents).
+/// Unknown agents are never promoted: they stay workspace/app-labeled.
+pub fn tier_for(
+    project_name: Option<&str>,
+    project_dir: Option<&str>,
+    agent_kind: &str,
+) -> &'static str {
+    let haystack = format!(
+        "{} {}",
+        project_name.unwrap_or_default(),
+        project_dir.unwrap_or_default()
+    )
+    .to_lowercase();
+    if haystack.contains("pitwall") {
+        return "pitwall-native";
+    }
+    if !agent_kind.is_empty() && agent_kind != "unknown" {
+        return "agents";
+    }
+    "workspace"
+}
+
+/// Presentation group key: shared project id when a project exists,
+/// otherwise the session/checkpoint's own id (ungrouped singleton).
+/// Identity untouched — grouping only.
+pub fn group_for(project_id: Option<&str>, session_id: &str) -> String {
+    project_id.unwrap_or(session_id).to_string()
+}
+
 pub fn snapshot_to_state_json(
     s: &WorkspaceSnapshot,
     resumable: &[Checkpoint],
@@ -300,7 +332,7 @@ pub fn snapshot_to_state_json(
         // Timeline enrichment (additive; unknown when unobserved).
         let meta_entry = meta.get(&sess.id);
         out.push_str(&format!(
-            "{{\"id\":{},\"state\":{},\"process_count\":{},\"project\":{},\"agent\":{{\"kind\":{},\"confidence\":{}}},\"window\":{},\"last_activity\":{{\"epoch\":{},\"kind\":{}}},\"summary\":{},\"role\":{},\"age_secs\":{},\"history\":{},\"root_pid\":{}}}",
+            "{{\"id\":{},\"state\":{},\"process_count\":{},\"project\":{},\"agent\":{{\"kind\":{},\"confidence\":{}}},\"window\":{},\"last_activity\":{{\"epoch\":{},\"kind\":{}}},\"summary\":{},\"role\":{},\"age_secs\":{},\"history\":{},\"root_pid\":{},\"tier\":{},\"group\":{}}}",
             q(&sess.id),
             q(sess.state.as_str()),
             sess.process_count,
@@ -314,7 +346,16 @@ pub fn snapshot_to_state_json(
             q(sess.role.as_str()),
             meta_entry.and_then(|m| m.age_secs).map_or("null".to_string(), |a| a.to_string()),
             q(meta_entry.map(|m| m.history.as_str()).unwrap_or("")),
-            sess.root_pid
+            sess.root_pid,
+            q(tier_for(
+                sess.project.as_ref().map(|p| p.name.as_str()),
+                sess.project.as_ref().map(|p| p.dir.as_str()),
+                sess.agent.kind.as_str()
+            )),
+            q(&group_for(
+                sess.project.as_ref().map(|p| p.id.as_str()),
+                &sess.id
+            ))
         ));
     }
     out.push_str("],\"resumable\":[");
@@ -322,21 +363,25 @@ pub fn snapshot_to_state_json(
         if i > 0 {
             out.push(',');
         }
+        let cp_name = project_basename(&cp.project_dir);
         out.push_str(&format!(
-            "{{\"checkpoint_id\":{},\"session_id\":{},\"project_id\":{},\"project_dir\":{},\"project_name\":{},\"branch\":{},\"git_clean\":{},\"agent_kind\":{},\"state\":{},\"last_activity_epoch\":{},\"created_at\":{},\"note\":{},\"trigger\":{}}}",
+            "{{\"checkpoint_id\":{},\"session_id\":{},\"project_id\":{},\"project_dir\":{},\"project_name\":{},\"branch\":{},\"git_clean\":{},\"agent_kind\":{},\"agent_confidence\":{},\"state\":{},\"last_activity_epoch\":{},\"created_at\":{},\"note\":{},\"trigger\":{},\"tier\":{},\"group\":{}}}",
             cp.id,
             q(&cp.session_id),
             q(&cp.project_id),
             q(&cp.project_dir),
-            q(project_basename(&cp.project_dir)),
+            q(cp_name),
             opt_q(cp.branch.as_deref()),
             opt_bool(cp.git_clean),
             q(&cp.agent_kind),
+            q(&cp.agent_confidence),
             q(normalize_state(&cp.state)),
             cp.last_activity_epoch,
             cp.created_at,
             opt_q(cp.note.as_deref()),
-            q(&cp.trigger)
+            q(&cp.trigger),
+            q(tier_for(Some(cp_name), Some(cp.project_dir.as_str()), cp.agent_kind.as_str())),
+            q(&group_for(Some(cp.project_id.as_str()), &cp.session_id))
         ));
     }
     out.push_str("],");
@@ -590,6 +635,49 @@ mod tests {
     }
 
     #[test]
+    fn tier_and_group_follow_documented_rules() {
+        // pitwall-native: product home project surfaces first.
+        assert_eq!(
+            tier_for(
+                Some("pitwall"),
+                Some("/home/u/Projects/pitwall"),
+                "opencode"
+            ),
+            "pitwall-native"
+        );
+        assert_eq!(tier_for(Some("PITWALL"), None, "unknown"), "pitwall-native");
+        // Known agents tier above plain workspace.
+        assert_eq!(
+            tier_for(Some("Work"), Some("/home/u/Work"), "opencode"),
+            "agents"
+        );
+        assert_eq!(
+            tier_for(Some("Work"), Some("/home/u/Work"), "claude"),
+            "agents"
+        );
+        // Unknown agents never promote, even with a project.
+        assert_eq!(
+            tier_for(Some("Work"), Some("/home/u/Work"), "unknown"),
+            "workspace"
+        );
+        assert_eq!(tier_for(None, None, ""), "workspace");
+        // Group: shared project id, else own session id (no merging).
+        assert_eq!(group_for(Some("proj_x"), "sess_a"), "proj_x");
+        assert_eq!(group_for(None, "sess_a"), "sess_a");
+    }
+
+    #[test]
+    fn writer_carries_tier_and_group() {
+        let snap = sample_snapshot();
+        let state =
+            snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &ConfigEcho::default());
+        // sample project is /home/u/Work, unknown agent -> workspace tier.
+        assert!(state.contains("\"tier\":\"workspace\""), "{state}");
+        assert!(state.contains("\"group\":\"proj_def\""), "{state}");
+        assert_well_formed(&state);
+    }
+
+    #[test]
     fn config_echo_renders_effective_choices() {
         let snap = sample_snapshot();
         let cfg = ConfigEcho {
@@ -650,6 +738,7 @@ mod tests {
             body.find("\"checkpoint_id\":2").unwrap() < body.find("\"checkpoint_id\":1").unwrap()
         );
         assert!(body.contains("\"project_name\":\"Work\""), "{body}");
+        assert!(body.contains("\"agent_confidence\":\"high\""), "{body}");
         assert!(body.contains("\"session_id\":\"sess_old\""), "{body}");
         assert!(body.contains("\"note\":\"halfway through auth\""), "{body}");
         assert!(!body.contains("\"pid\""), "{body}");

@@ -126,6 +126,41 @@ Complete. Handover ready.
 
 ---
 
+## 2026-09-10 — M5g tree/grouping: delegated, reviewed, implemented (PRE)
+
+### Objective
+First M5g hardening slice from dogfood wave 1: semantic display
+hierarchy + project grouping, via real child agents.
+
+### Child work (reviewed, accepted)
+- Child 1: UI tree proposal (project-grouped, tier-ordered, collapse,
+  StateReader untouched). Sound; adopted with adjustments.
+- Child 2: grouping-correctness proof (roots=window PIDs, project
+  sharing legitimate, /proc artifact identified) + derived
+  `group_key=project.id else session.id`, no new DB. Adopted verbatim.
+
+### PRE decision & implementation
+Smallest coherent slice: (1) exclude `/proc|/sys|/dev` cwds at source
+(spurious identity fix, tested); (2) pure `tier_for`/`group_for` in
+output.rs with additive state.json fields (sessions + resumable);
+(3) QML grouped rail reusing SessionBar/toast/actions (tiers,
+  collapsible project headers, live-then-history per group).
+No identity, schema, or DB changes. Resumable confidence added on
+review (high-confidence history rendered `?` before).
+
+### Verified result
+- `cargo fmt/clippy/test` green (107 passed, incl. 4 new).
+- Live: 6 sessions → grouped tree (pitwall-native ×3+2, agents,
+  workspace); /proc project gone; screenshots inspected; zero QML
+  errors across restart; resumable confidence correct.
+- Children logs untouched by PRE (4 files remain theirs to commit).
+
+### Status
+Implemented by PRE (cross-cutting integration per §12). Children idle
+awaiting follow-up. Next: user decides (more M5g slices or stand down).
+
+---
+
 ## CURRENT STATE
 
 - Latest verified commit: `6a336df` (== origin/main; only children

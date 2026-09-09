@@ -13,3 +13,7 @@
   categories) is M5g design work, not a hotfix. Transient/zombie
   process counting needs design before any filter. Never commit
   another agent's files.
+- D7 (2026-09-10, M5g tree): tier/group are presentation-only
+  derivations (Rust pure fns, state.json additive fields); /proc-
+  subtree cwds excluded at source (spurious identity fix); resumable
+  rows carry confidence; no identity/schema/DB changes.

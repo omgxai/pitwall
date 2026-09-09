@@ -411,11 +411,15 @@ fn derive_session_state(processes: &[ProcessInfo]) -> SessionState {
 /// Project directory = mode cwd across descendant processes (ties broken by
 /// lexicographic order for determinism). Emulator roots (`/`, empty,
 /// unreadable) are excluded — verified live that they carry no signal.
+/// Pseudo-filesystem cwds (`/proc`, `/sys`, `/dev` subtrees) are also
+/// excluded: they are kernel artifacts (e.g. a browser helper reporting
+/// `/proc/<pid>/fdinfo`), never projects. Without this, unrelated app
+/// windows can share a spurious project identity.
 fn project_dir_for(processes: &[ProcessInfo]) -> Option<String> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for p in processes {
         let cwd = p.cwd.as_str();
-        if cwd.is_empty() || cwd == "/" {
+        if cwd.is_empty() || cwd == "/" || is_pseudo_fs_path(cwd) {
             continue;
         }
         *counts.entry(cwd).or_default() += 1;
@@ -424,6 +428,13 @@ fn project_dir_for(processes: &[ProcessInfo]) -> Option<String> {
         .into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
         .map(|(cwd, _)| cwd.to_string())
+}
+
+/// True for paths that can never be a project directory: kernel and
+/// device pseudo-filesystems.
+fn is_pseudo_fs_path(path: &str) -> bool {
+    const ROOTS: &[&str] = &["/proc/", "/sys/", "/dev/"];
+    ROOTS.iter().any(|r| path.starts_with(r))
 }
 
 fn project_name(dir: &str) -> String {
@@ -799,6 +810,55 @@ mod tests {
         assert_eq!(s.agent.kind, AgentKind::Unknown);
         assert_eq!(s.agent.confidence, Confidence::Unknown);
         assert!(s.agent.evidence.is_empty());
+    }
+
+    #[test]
+    fn pseudo_fs_cwds_are_never_projects() {
+        // A browser helper reporting cwd under /proc (observed live as
+        // /proc/<pid>/fdinfo) must not mint a project identity.
+        let plat = MockPlatform {
+            processes: vec![
+                raw(
+                    900,
+                    1,
+                    "chromium",
+                    "/usr/lib/chromium/chromium",
+                    "/",
+                    'S',
+                    1,
+                ),
+                raw(
+                    901,
+                    900,
+                    "helper",
+                    "/usr/lib/chromium/helper",
+                    "/proc/726845/fdinfo",
+                    'S',
+                    2,
+                ),
+                raw(
+                    902,
+                    900,
+                    "gpu",
+                    "/usr/lib/chromium/gpu",
+                    "/sys/fs/cgroup",
+                    'S',
+                    3,
+                ),
+            ],
+            windows: vec![window("0x9", "chromium", "Page", 900)],
+            repos: HashMap::new(),
+        };
+        let snap = collect(&plat);
+        assert!(
+            snap.sessions[0].project.is_none(),
+            "pseudo-fs cwd must not projectize"
+        );
+        assert!(is_pseudo_fs_path("/proc/1/fdinfo"));
+        assert!(is_pseudo_fs_path("/sys/kernel"));
+        assert!(is_pseudo_fs_path("/dev/pts/0"));
+        assert!(!is_pseudo_fs_path("/home/u/Work"));
+        assert!(!is_pseudo_fs_path("/procstuff/x"));
     }
 
     #[test]
