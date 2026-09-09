@@ -32,6 +32,16 @@ all detection lives in the Rust daemon/CLI, never in QML.
 - Glyphs verified present in the installed font via `fc-query` charset:
   U+25CF/25CB (dots), U+F034E (focus). No other codepoints assumed.
 
+## Design notes
+
+- No gauge: evaluated process-count and freshness meters; both either
+  imply false semantics (more procs ≠ healthier) or duplicate the
+  activity strip. Per project rule, a clean panel beats a meaningless
+  gauge. Revisit only with a genuinely new quantity in state.json.
+- ActivityStrip encodes recency (height) × state (color) from real
+  `last_activity` epochs only. Never labeled CPU/productivity/health.
+- Pulse: 1400ms, opacity 1.0↔0.65, running-state only, dead otherwise.
+
 ## Dev workflow
 
 ```bash

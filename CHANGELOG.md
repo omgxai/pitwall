@@ -7,6 +7,10 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M3 panel instrumentation polish: subconscious 1400ms working pulse,
+  160–180ms state/data transitions (budget-held), ActivityStrip honesty
+  kept, gauge deliberately omitted (documented). No Rust/state.json
+  changes.
 - M3 Omarchy panel: `plugin/dev.pitwall/` (manifest, Widget, StateReader,
   SessionHero, SessionRow, ActivityStrip, StateDot, README). Kit-only QML,
   FileView-driven state.json, native `Toplevel.activate()` Focus,

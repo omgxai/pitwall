@@ -8,7 +8,8 @@
 - **M0 — Repository foundation**: COMPLETE, pushed (`62fdfdb`).
 - **M1 — Workspace/process discovery**: COMPLETE, pushed (`7f5ec34`).
 - **M2 — Local state**: COMPLETE, pushed (`5511eaa`).
-- **M3 — Omarchy panel prototype**: COMPLETE (pending commit/push below).
+- **M3 — Omarchy panel prototype**: COMPLETE, pushed (`5a591d5`).
+- **M3 visual polish**: COMPLETE (pending commit/push below).
 
 ## Completed work
 
@@ -131,9 +132,39 @@
 - Screenshots inspected: popup open state, bar indicator fresh + stale.
 - Secret scan — clean (results at commit time).
 
+## Completed work (M3 polish)
+
+- [x] Pulse softened: 1400ms period, opacity 1.0↔0.65, running-only,
+  dead otherwise (unchanged budget).
+- [x] State transitions: 160ms color ease on StateDot, 180ms height/color
+  ease on ActivityStrip segments (data-change only). Worst case 2
+  concurrent animations — within budget.
+- [x] Gauge deliberately NOT added: process-count implies false semantics,
+  freshness duplicates the strip. Documented in plugin README.
+- [x] Focus hover/press: already owned by kit PanelActionButton — no change.
+- [x] Live screenshots: working (`●` accent), waiting (`●` urgent + tint,
+  genuine STOPped-session capture), idle, stale-tinted, multi-row.
+- [x] No Rust / state.json / dependency / font / M4 changes.
+
+## Remaining work (next)
+
+- M4: project/terminal mapping + checkpoints + Resume.
+
+## Known problems / limits (M3 polish)
+
+- Session-state priority is pid-ordered, not severity-ordered: a Running
+  process earlier in pid order masks a Stopped one (observed live). No
+  Rust changes allowed in this pass — noted for M4 review.
+- 6+ cap, vertical-bar dot fallback, physical Focus click: as M3.
+
+## Tests performed (M3 polish, 2026-09-09)
+
+- Rust gate unchanged-green: fmt clean, 38 passed, clippy clean.
+- Shell reload clean; QML error sweep clean; secret scan clean.
+
 ## Exact next step
 
-- Commit + push M3, then await instruction to begin M4.
+- Commit + push M3 polish, then await instruction to begin M4.
 
 ## Completed work (M0 archive)
 

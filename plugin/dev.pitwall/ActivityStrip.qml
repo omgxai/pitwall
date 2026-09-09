@@ -45,6 +45,16 @@ Item {
         anchors.bottom: parent.bottom
         color: root.colorFor(sess)
         opacity: 0.9
+
+        // Data-change transition only: segments ease to new heights when
+        // the record refreshes (≤180ms, OutCubic). No looping, no idle
+        // motion — still rectangles otherwise.
+        Behavior on height {
+          NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+        }
+        Behavior on color {
+          ColorAnimation { duration: 180 }
+        }
       }
     }
   }
