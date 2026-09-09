@@ -384,8 +384,13 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
     };
 
     let mut sessions = Vec::new();
+    // Observer hygiene: the collector's own process is never part of the
+    // observation. Without this, every invocation would force
+    // `last_activity` to "now" in the invoking session, i.e. the observer
+    // would always measure itself.
+    let self_pid = std::process::id();
     for window in platform.windows() {
-        // Descendant BFS from the window's root PID (root included).
+        // Descendant BFS from the window's root PID (root included, self excluded).
         let mut tree: Vec<u32> = Vec::new();
         let mut stack = vec![window.pid];
         let mut seen = std::collections::HashSet::new();
@@ -393,7 +398,9 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
             if !seen.insert(pid) {
                 continue;
             }
-            tree.push(pid);
+            if pid != self_pid {
+                tree.push(pid);
+            }
             if let Some(kids) = children.get(&pid) {
                 stack.extend(kids.iter().copied());
             }
@@ -415,7 +422,10 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
         processes.sort_by_key(|p| p.pid);
         processes.truncate(MAX_SESSION_PROCESSES);
 
-        let project = project_dir_for(&processes).map(|dir| {
+        let project = project_dir_for(&processes).map(|raw_dir| {
+            // P1: normalize before hashing or displaying, so `/x/`,
+            // symlinked, and real paths share one project identity.
+            let dir = ids::normalize_project_dir(&raw_dir);
             let git = platform.git_info(&dir);
             ProjectInfo {
                 id: ids::project_id(&dir),
@@ -682,6 +692,34 @@ mod tests {
         assert!(p.is_git_repo);
         assert_eq!(p.branch.as_deref(), Some("main"));
         assert_eq!(p.git_clean, Some(true));
+    }
+
+    #[test]
+    fn collector_excludes_its_own_process() {
+        let self_pid = std::process::id();
+        let plat = MockPlatform {
+            processes: vec![
+                raw(400, 1, "bash", "/bin/bash", "/home/u/Work", 'S', 1),
+                // The observer, mid-tree: must not appear in output.
+                raw(
+                    self_pid,
+                    400,
+                    "pitwall",
+                    "pitwall status --json",
+                    "/home/u/Work",
+                    'R',
+                    99999,
+                ),
+            ],
+            windows: vec![window("0x3", "foot", "t", 400)],
+            repos: HashMap::new(),
+        };
+        let snap = collect(&plat);
+        let s = &snap.sessions[0];
+        assert!(s.processes.iter().all(|p| p.pid != self_pid));
+        assert_eq!(s.process_count, 1);
+        // last_activity must come from the shell, not the observer.
+        assert_eq!(s.last_activity_epoch, 1_700_000_000);
     }
 
     #[test]

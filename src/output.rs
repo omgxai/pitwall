@@ -140,6 +140,77 @@ pub fn snapshot_to_text(s: &WorkspaceSnapshot) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// state.json artifact (M2): SEPARATE interface from `status --json`.
+// ---------------------------------------------------------------------------
+//
+// `status --json` is the live CLI read API (schema v1, includes ephemeral
+// per-process detail for debugging). `state.json` is the small, versioned,
+// machine-readable artifact for future M3 panel consumption. Both are
+// generated from the same [`WorkspaceSnapshot`], but neither is derived
+// from the other's bytes: the panel must never depend on CLI formatting.
+//
+// state.json contract (state_version 1):
+// - top level: state_version, collected_at, hostname, session_count, sessions
+// - per session: id, state, process_count, project{id,dir,name,is_git_repo,
+//   branch,git_clean}|null, agent{kind,confidence}, window{address,class,
+//   title,workspace}|null, last_activity{epoch,kind}, summary
+// - NEVER included: per-process command lines, agent evidence strings,
+//   or anything beyond the fields above (see SECURITY.md boundary).
+pub const STATE_SCHEMA_VERSION: u32 = 1;
+
+/// Render a snapshot as the `state.json` artifact (state schema v1).
+pub fn snapshot_to_state_json(s: &WorkspaceSnapshot) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{{\"state_version\":{},\"collected_at\":{},\"hostname\":{},\"session_count\":{},\"sessions\":[",
+        STATE_SCHEMA_VERSION,
+        s.collected_at_epoch,
+        q(&s.hostname),
+        s.sessions.len()
+    ));
+    for (i, sess) in s.sessions.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let project = sess.project.as_ref().map_or("null".to_string(), |p| {
+            format!(
+                "{{\"id\":{},\"dir\":{},\"name\":{},\"is_git_repo\":{},\"branch\":{},\"git_clean\":{}}}",
+                q(&p.id),
+                q(&p.dir),
+                q(&p.name),
+                p.is_git_repo,
+                opt_q(p.branch.as_deref()),
+                opt_bool(p.git_clean)
+            )
+        });
+        let window = sess.window.as_ref().map_or("null".to_string(), |w| {
+            format!(
+                "{{\"address\":{},\"class\":{},\"title\":{},\"workspace\":{}}}",
+                q(&w.address),
+                q(&w.class),
+                q(&w.title),
+                q(&w.workspace)
+            )
+        });
+        out.push_str(&format!(
+            "{{\"id\":{},\"state\":{},\"process_count\":{},\"project\":{},\"agent\":{{\"kind\":{},\"confidence\":{}}},\"window\":{},\"last_activity\":{{\"epoch\":{},\"kind\":{}}},\"summary\":{}}}",
+            q(&sess.id),
+            q(sess.state.as_str()),
+            sess.process_count,
+            project,
+            q(sess.agent.kind.as_str()),
+            q(sess.agent.confidence.as_str()),
+            window,
+            sess.last_activity_epoch,
+            q(sess.last_activity_kind),
+            q(&sess.summary)
+        ));
+    }
+    out.push_str("]}");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +283,29 @@ mod tests {
         let text = snapshot_to_text(&sample_snapshot());
         assert!(text.contains("1 session(s) on"));
         assert!(text.contains("sess_abc"));
+    }
+
+    #[test]
+    fn state_artifact_is_separate_versioned_and_scrubbed() {
+        let mut snap = sample_snapshot();
+        snap.sessions[0].processes[0].command = "opencode --token hunter2-supersecret".to_string();
+        snap.sessions[0].agent.evidence = vec!["cmd:opencode (pid 10)".to_string()];
+        let state = snapshot_to_state_json(&snap);
+        assert!(state.starts_with("{\"state_version\":1"), "{state}");
+        assert!(state.contains("\"summary\":"), "{state}");
+        assert!(
+            !state.contains("hunter2-supersecret"),
+            "cmdline leaked: {state}"
+        );
+        assert!(!state.contains("--token"), "cmdline leaked: {state}");
+        assert!(
+            !state.contains("evidence"),
+            "evidence strings excluded: {state}"
+        );
+        assert!(
+            !state.contains("\"processes\""),
+            "process detail excluded: {state}"
+        );
+        assert!(!state.contains("\"pid\""), "pids excluded: {state}");
     }
 }

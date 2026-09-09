@@ -33,3 +33,26 @@ until the first tagged release; a version table will be published at v0.1.0.
   history shared with the repo.
 - CI includes a secret-scan step (gitleaks-style pattern check) that fails
   the build on suspected committed credentials.
+
+## Persistence boundary (M2, binding)
+
+Pitwall observes full process command lines in memory to classify agents
+(`status --json` may show them ephemerally for local debugging). The
+following MUST NOT enter SQLite history or `state.json`:
+
+- full argv / command-line strings (only the process **name** is persisted)
+- agent evidence strings containing command text (evidence stays in the
+  live CLI output only)
+- environment variables (never read, never stored)
+- API keys, tokens, passwords, secrets of any kind
+- command history or terminal output
+
+Persisted per session (only): project id/dir/name, git repo state
+(is_repo/branch/clean), session id, agent kind + confidence, aggregate
+state, process count, activity epoch, window address/class/title/workspace,
+collection time, hostname. Per process: name, state, start time, cwd.
+
+Enforcement: unit tests assert secret-bearing fixtures never reach database
+bytes (`full_cmdline_never_reaches_sqlite`) or the state artifact
+(`state_artifact_is_separate_versioned_and_scrubbed`). CI secret-scan
+covers the repository itself.

@@ -17,6 +17,10 @@ name = "pitwall_lib"
 path = "src/lib.rs"
 
 [dependencies]
+# Sole third-party dependency (M2): SQLite access for the local continuity
+# cache. `bundled` builds SQLite from source — no system library required,
+# keeping installs robust and the build offline-repeatable via Cargo.lock.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Pitwall periodic workspace snapshot (every 5 minutes)
+Documentation=https://github.com/omgxai/pitwall
+# M2: conservative cadence. Writes are hash-gated (no-op when unchanged),
+# so idle ticks cost ~10ms CPU and zero disk writes. NOT enabled by
+# default in M2.
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

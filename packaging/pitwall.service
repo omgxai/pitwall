@@ -1,17 +1,18 @@
 [Unit]
-Description=Pitwall workspace awareness daemon
-Documentation=https://github.com/pitwall/pitwall
-# M0 stub: ExecStart and full unit wiring land with the daemon (M2).
-# Standard layout (planned):
-#   ExecStart=%h/.local/bin/pitwall daemon
-#   Restart=on-failure
+Description=Pitwall workspace snapshot (oneshot)
+Documentation=https://github.com/omgxai/pitwall
+# M2: persistence invocation path. Conservative by design: this is a
+# oneshot unit, NOT a resident daemon. Pair with pitwall-snapshot.timer
+# (every 5 minutes) or invoke manually via `pitwall snapshot`.
+# NOT enabled by default in M2; enablement arrives with M3+ packaging.
 After=graphical-session.target
 
 [Service]
-Type=simple
-# ExecStart=%h/.local/bin/pitwall daemon
-Restart=on-failure
-RestartSec=5
+Type=oneshot
+ExecStart=%h/.local/bin/pitwall snapshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 
 [Install]
 WantedBy=default.target

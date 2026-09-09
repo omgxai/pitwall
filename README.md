@@ -8,8 +8,10 @@ local-first awareness and continuity layer above them: one glance tells you
 what is happening across your workspace, and when you return to your machine
 you can resume without reconstructing context.
 
-> **Status:** v0.1.0 scaffold (M0). The collector, panel plugin, and summaries
-> are not implemented yet. See [ROADMAP.md](ROADMAP.md) and
+> **Status:** v0.1.0 in development (M2). `pitwall status [--json]` observes
+> live sessions; `pitwall snapshot` persists to a local SQLite cache and
+> refreshes `state.json`. Panel, summaries, and checkpoints are not
+> implemented yet. See [ROADMAP.md](ROADMAP.md) and
 > [.pitwall/STATE.md](.pitwall/STATE.md).
 
 ## What is Pitwall?

@@ -5,11 +5,12 @@ until M(n) is stable and committed.
 
 - [x] **M0 — Repository foundation** (current): Cargo scaffold, MIT license,
   docs, ADRs, CI skeleton, `.pitwall/STATE.md`, packaging stub.
-- [ ] **M1 — Workspace/process discovery**: `/proc` + `hyprctl clients -j`
+- [x] **M1 — Workspace/process discovery**: `/proc` + `hyprctl clients -j`
   collector; `pitwall status --json` lists real terminals/sessions/processes.
-  (Implemented, pending commit/push.)
-- [ ] **M2 — Local state**: SQLite schema + snapshot JSON + systemd user unit;
-  restart-safe, low CPU.
+- [x] **M2 — Local state**: SQLite continuity cache (`meta`, `observations`,
+  `sessions`; hash-gated writes; newest-100 pruning), `state.json` artifact
+  (state schema v1), `pitwall snapshot`, systemd unit + timer (shipped,
+  not enabled by default).
 - [ ] **M3 — Omarchy panel prototype**: `dev.pitwall` bar-widget (indicator +
   compact panel) reading the snapshot; install via `omarchy plugin enable`.
 - [ ] **M4 — Project/terminal mapping + checkpoints + Resume**: git-aware

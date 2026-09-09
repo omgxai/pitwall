@@ -9,3 +9,4 @@ keep each under a page.
 - [ADR-004: Workspace detection strategy](ADR-004-detection-strategy.md)
 - [ADR-005: OpenRouter integration](ADR-005-openrouter-integration.md)
 - [ADR-006: Local state / checkpoint architecture](ADR-006-checkpoint-architecture.md)
+- [ADR-007: SQLite continuity cache](ADR-007-continuity-cache.md)

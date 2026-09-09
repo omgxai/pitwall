@@ -8,6 +8,7 @@ pub mod collector;
 pub mod ids;
 pub mod output;
 pub mod platform;
+pub mod store;
 
 /// Crate version string, kept in sync with `Cargo.toml`.
 pub fn version() -> &'static str {

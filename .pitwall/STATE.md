@@ -6,7 +6,8 @@
 ## Last verified milestone
 
 - **M0 — Repository foundation**: COMPLETE, pushed (`62fdfdb`).
-- **M1 — Workspace/process discovery**: COMPLETE, committed + pushed (`7f5ec34`).
+- **M1 — Workspace/process discovery**: COMPLETE, pushed (`7f5ec34`).
+- **M2 — Local state**: COMPLETE (pending commit/push below).
 - **M2 pre-flight review**: COMPLETE (review-only, no implementation).
 
 ## Completed work
@@ -45,10 +46,54 @@
   unknown; IDs stable across runs; ~11ms runtime.
 - Secret scan — clean.
 
+## Completed work (M2)
+
+- [x] `rusqlite` 0.32 (bundled) added as sole dependency; `Cargo.lock` now
+  tracked (binary crate).
+- [x] P1 normalization (`normalize_project_dir`): trailing-slash strip,
+  canonicalize, raw fallback. Live IDs unchanged for canonical paths.
+- [x] Observer self-exclusion: collector drops its own PID (concrete
+  correctness fix — observer no longer forces `last_activity` to "now").
+- [x] `store` module: `meta`/`observations`/`sessions` schema v1,
+  `user_version` gating, hash-gated writes, newest-100 pruning, corrupt
+  quarantine (`pitwall.db.corrupt-<ts>`), newer-version refusal, permission
+  degradation without quarantine.
+- [x] `state.json` artifact: separate state schema v1 (no cmdlines, no
+  evidence, no per-process detail), atomic temp+rename writes.
+- [x] `pitwall snapshot [--db/--state/--data-dir]`; defaults to
+  `~/.local/share/pitwall/`.
+- [x] systemd `pitwall.service` (oneshot) + `pitwall-snapshot.timer` (5min)
+  shipped, NOT enabled.
+- [x] SECURITY.md persistence boundary; ADR-007; ROADMAP/CHANGELOG updated.
+
+## Remaining work (next)
+
+- M3: Omarchy panel prototype (`dev.pitwall` bar-widget reading state.json).
+
+## Known problems / limits (M2)
+
+- None blocking. Observer effect: separate one-shot invocations always see
+  a fresh parent shell, so back-to-back manual snapshots each write; the
+  hash gate bites for daemon-style steady state (proven: same-shell repeat
+  → "unchanged, no write"). Documented, accepted.
+- Non-opencode agent rules still untested live; checkpoints/resume are M4.
+
+## Tests performed (M2, 2026-09-09)
+
+- `cargo fmt --check` — clean.
+- `cargo test` — 38 passed, 0 failed (store: fresh/version/insert/
+  unchanged/changed/prune/corrupt/newer/perms/privacy; ids: normalization,
+  trailing-slash, symlink; output: state-contract scrub).
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- Live: `status` + `status --json` valid; `snapshot` wrote obs 1;
+  same-shell repeat → unchanged; new child process → new observation;
+  session/project IDs identical to M1; `state.json` valid state_version 1;
+  real-DB strings sweep clean; ~10ms per snapshot.
+- Secret scan — clean (results at commit time).
+
 ## Exact next step
 
-- Await instruction to begin M2 implementation (M2 pre-flight review
-  findings recorded in conversation; no code changes made).
+- Commit + push M2, then await instruction to begin M3.
 
 ## Completed work (M0 archive)
 

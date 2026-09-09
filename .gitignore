@@ -1,6 +1,6 @@
 # Generated files
 /target/
-Cargo.lock
+# NOTE: Cargo.lock is intentionally TRACKED (binary crate → reproducible builds).
 
 # Editor / OS noise
 .vscode/
@@ -14,8 +14,10 @@ Cargo.lock
 *.db-journal
 *.db-wal
 *.db-shm
-.pitwall/local/
+*.corrupt-*
 state.json
+state.tmp
+.pitwall/local/
 
 # Secrets (never commit API keys, tokens, or keyrings)
 .env

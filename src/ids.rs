@@ -28,8 +28,29 @@ pub fn fnv1a_hex(input: &str) -> String {
 /// Stable project identity: derived from the canonical project directory.
 /// The same directory always maps to the same ID, across restarts and
 /// refreshes.
+///
+/// IMPORTANT: pass the output of [`normalize_project_dir`] here, not a raw
+/// observed cwd. Raw cwds vary (`/x/` vs `/x`, symlinked vs real paths) and
+/// would split one project into several IDs.
 pub fn project_id(canonical_dir: &str) -> String {
     format!("proj_{}", fnv1a_hex(canonical_dir))
+}
+
+/// Normalize a project directory for identity purposes (P1):
+///
+/// - strip trailing `/` (root stays `/`);
+/// - resolve symlinks via `std::fs::canonicalize`;
+/// - fall back to the stripped raw path when canonicalization fails
+///   (vanished dir, permission denied).
+///
+/// Deterministic: same input always yields the same output on the same
+/// machine. Cross-machine stability is not promised (paths differ anyway).
+pub fn normalize_project_dir(dir: &str) -> String {
+    let stripped = dir.trim_end_matches('/');
+    let base = if stripped.is_empty() { "/" } else { stripped };
+    std::fs::canonicalize(base)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| base.to_string())
 }
 
 /// Session identity: derived from project ID + Hyprland window address +
@@ -72,6 +93,44 @@ mod tests {
         assert_eq!(project_id("/home/guru/Work"), project_id("/home/guru/Work"));
         assert_ne!(project_id("/home/guru/Work"), project_id("/home/guru"));
         assert!(project_id("/x").starts_with("proj_"));
+    }
+
+    #[test]
+    fn normalization_strips_trailing_slash() {
+        assert_eq!(normalize_project_dir("/home/guru/Work/"), "/home/guru/Work");
+        assert_eq!(
+            normalize_project_dir("/home/guru/Work///"),
+            "/home/guru/Work"
+        );
+        assert_eq!(normalize_project_dir("/"), "/");
+    }
+
+    #[test]
+    fn normalization_falls_back_for_missing_dirs() {
+        assert_eq!(normalize_project_dir("/no/such/dir/"), "/no/such/dir");
+    }
+
+    #[test]
+    fn normalization_resolves_symlinks() {
+        let base = std::env::temp_dir().join("pitwall-m2-symlink-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+        let via_link = normalize_project_dir(&base.join("link").to_string_lossy());
+        let via_real = normalize_project_dir(&real.to_string_lossy());
+        assert_eq!(via_link, via_real);
+        // …and therefore the same project ID.
+        assert_eq!(project_id(&via_link), project_id(&via_real));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn trailing_slash_shares_project_id() {
+        let a = normalize_project_dir("/home/guru/Work/");
+        let b = normalize_project_dir("/home/guru/Work");
+        assert_eq!(project_id(&a), project_id(&b));
     }
 
     #[test]

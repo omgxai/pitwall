@@ -7,6 +7,12 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M2 local continuity cache: `store` module on `rusqlite` (bundled, sole
+  dependency), `meta`/`observations`/`sessions` schema v1, hash-gated
+  writes, newest-100 pruning, corrupt-quarantine + newer-version refusal,
+  `state.json` artifact (state schema v1, scrubbed), `pitwall snapshot`,
+  P1 project-dir normalization, observer self-exclusion, systemd unit +
+  timer (shipped disabled), ADR-007, SECURITY persistence boundary.
 - M1 workspace discovery: `platform` trait + Linux impl, `collector` with
   confidence states and stable `proj_`/`sess_` IDs, `pitwall status [--json]`
   (JSON schema v1), 23 unit tests with fixtures/mocks.
