@@ -128,7 +128,8 @@ Complete. Handover ready.
 
 ## CURRENT STATE
 
-- Latest verified commit: evolving this wave (verify at push).
+- Latest verified commit: `6a336df` (== origin/main; only children
+  logs remain uncommitted, theirs).
 - Active child agents: Child 1 + Child 2 COMPLETE but sessions alive
   (awaiting follow-up or dismissal).
 - M5g backlog (prioritized): semantic display hierarchy; twin
