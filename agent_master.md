@@ -109,6 +109,23 @@ per no-commit-others'-work rule — need child commit or wave 2.
 
 ---
 
+## 2026-09-10 — Context compaction handover (PRE)
+
+### Objective
+Canonical `docs/CURRENT_CONTEXT.md` (~2k words) so a fresh session can
+start without prior conversation. No code, no milestones, no M5g.
+
+### Implementation
+- Wrote `docs/CURRENT_CONTEXT.md` (21 sections: identity → next task).
+- Recorded wave-1 lessons, locked decisions, rejected/deferred list,
+  boundary statement, ranked next step (semantic hierarchy first).
+- Verified links, milestone/commit accuracy, commercial-term clean.
+
+### Status
+Complete. Handover ready.
+
+---
+
 ## CURRENT STATE
 
 - Latest verified commit: evolving this wave (verify at push).
