@@ -6,7 +6,8 @@
 ## Last verified milestone
 
 - **M0 — Repository foundation**: COMPLETE, pushed (`62fdfdb`).
-- **M1 — Workspace/process discovery**: COMPLETE (pending commit/push below).
+- **M1 — Workspace/process discovery**: COMPLETE, committed + pushed (`7f5ec34`).
+- **M2 pre-flight review**: COMPLETE (review-only, no implementation).
 
 ## Completed work
 
@@ -46,7 +47,8 @@
 
 ## Exact next step
 
-- Commit + push M1, then await instruction to begin M2.
+- Await instruction to begin M2 implementation (M2 pre-flight review
+  findings recorded in conversation; no code changes made).
 
 ## Completed work (M0 archive)
 
