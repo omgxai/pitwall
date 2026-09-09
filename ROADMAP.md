@@ -11,8 +11,9 @@ until M(n) is stable and committed.
   `sessions`; hash-gated writes; newest-100 pruning), `state.json` artifact
   (state schema v1), `pitwall snapshot`, systemd unit + timer (shipped,
   not enabled by default).
-- [ ] **M3 — Omarchy panel prototype**: `dev.pitwall` bar-widget (indicator +
-  compact panel) reading the snapshot; install via `omarchy plugin enable`.
+- [x] **M3 — Omarchy panel prototype**: `dev.pitwall` bar-widget (indicator +
+  KeyboardPanel popup) reading `state.json`; Focus via native activate;
+  dev-installed, screenshot-verified.
 - [ ] **M4 — Project/terminal mapping + checkpoints + Resume**: git-aware
   project detection, checkpoint records, focus/open actions.
 - [ ] **M5 — OpenRouter BYO integration**: optional cached one-line summaries

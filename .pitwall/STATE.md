@@ -7,8 +7,8 @@
 
 - **M0 — Repository foundation**: COMPLETE, pushed (`62fdfdb`).
 - **M1 — Workspace/process discovery**: COMPLETE, pushed (`7f5ec34`).
-- **M2 — Local state**: COMPLETE (pending commit/push below).
-- **M2 pre-flight review**: COMPLETE (review-only, no implementation).
+- **M2 — Local state**: COMPLETE, pushed (`5511eaa`).
+- **M3 — Omarchy panel prototype**: COMPLETE (pending commit/push below).
 
 ## Completed work
 
@@ -91,9 +91,49 @@
   real-DB strings sweep clean; ~10ms per snapshot.
 - Secret scan — clean (results at commit time).
 
+## Completed work (M3)
+
+- [x] M3 design study (installed Omarchy sources only): Style/Color tokens,
+  Panel/BarIconButton/WidgetButton/KeyboardPanel/PanelHero/rows/buttons,
+  FileView pattern, Nerd glyph coverage verified via `fc-query`.
+- [x] `plugin/dev.pitwall/`: manifest + Widget/StateReader/SessionHero/
+  SessionRow/ActivityStrip/StateDot + README. Kit-only, zero hardcodes.
+- [x] Focus via native `Toplevel.activate()` (app-id + title-tiebreak,
+  refuse-on-ambiguous). `hyprctl dispatch` proven unusable here (its Lua
+  shorthand rejects all multi-token calls) — documented in plugin README.
+- [x] Functional pass live: registered third-party, hot-reload clean, IPC
+  open/close, malformed→warn+null, missing→silent null, FileView live
+  refresh on snapshot, multi-session rows, stale→urgent tint.
+- [x] Visual pass via screenshots: popup (hero/sections/strip/rows) and
+  bar indicator (`● pitwall:main +1`) both native-proportioned.
+- [x] Dev install at `~/.config/omarchy/plugins/dev.pitwall` (copy, not
+  in repo); enabled in right section via `omarchy plugin enable`.
+
+## Remaining work (next)
+
+- M4: project/terminal mapping + checkpoints + Resume.
+
+## Known problems / limits (M3)
+
+- Focus button click path itself not clicked headlessly; matching logic
+  follows the first-party `activate()` mechanism and degrades to warn +
+  no-op. Recommend a manual click check when convenient.
+- Vertical-bar mode falls back to dot-only (untested live, mirrors
+  ActiveWindow precedent).
+- 6+ session cap (`+N more`, no scroll) untested live (max 3 observed).
+
+## Tests performed (M3, 2026-09-09)
+
+- Rust: `cargo fmt --check` clean, `cargo test` 38 passed, clippy clean
+  (no Rust changes in M3; QML is the deliverable).
+- Live shell: zero QML errors/warnings for dev.pitwall across reloads;
+  `omarchy-shell shell listPlugins` shows dev.pitwall enabled third-party.
+- Screenshots inspected: popup open state, bar indicator fresh + stale.
+- Secret scan — clean (results at commit time).
+
 ## Exact next step
 
-- Commit + push M2, then await instruction to begin M3.
+- Commit + push M3, then await instruction to begin M4.
 
 ## Completed work (M0 archive)
 

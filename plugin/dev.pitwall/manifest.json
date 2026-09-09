@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "id": "dev.pitwall",
+  "name": "Pitwall",
+  "version": "0.1.0",
+  "author": "Pitwall contributors",
+  "license": "MIT",
+  "description": "Workspace awareness: live sessions, agents, and resume in the bar.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Pitwall",
+    "description": "Live terminal sessions and AI agents with one-click focus.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "statePath": "",
+      "staleAfterSec": 900
+    },
+    "schema": [
+      {
+        "key": "statePath",
+        "type": "string",
+        "label": "State file path",
+        "defaultValue": "",
+        "description": "Empty = $XDG_DATA_HOME/pitwall/state.json, else ~/.local/share/pitwall/state.json."
+      },
+      {
+        "key": "staleAfterSec",
+        "type": "integer",
+        "label": "Stale threshold (seconds)",
+        "min": 60,
+        "max": 86400,
+        "step": 60,
+        "defaultValue": 900
+      }
+    ]
+  }
+}

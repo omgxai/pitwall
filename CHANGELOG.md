@@ -7,6 +7,10 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M3 Omarchy panel: `plugin/dev.pitwall/` (manifest, Widget, StateReader,
+  SessionHero, SessionRow, ActivityStrip, StateDot, README). Kit-only QML,
+  FileView-driven state.json, native `Toplevel.activate()` Focus,
+  animation budget enforced, screenshot-verified on live desktop.
 - M2 local continuity cache: `store` module on `rusqlite` (bundled, sole
   dependency), `meta`/`observations`/`sessions` schema v1, hash-gated
   writes, newest-100 pruning, corrupt-quarantine + newer-version refusal,
