@@ -199,6 +199,7 @@ Panel {
     showSettings = false
     summaryExpanded = false
     stateReader.refresh()
+    root.refreshNow()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -262,6 +263,30 @@ Panel {
     modelsProc.onDone = then || null
     modelsProc.command = ["pitwall", "models", "--agent", String(agent || "opencode")]
     modelsProc.running = true
+  }
+
+  property bool refreshing: false
+
+  // Workspace refresh (explicit open/manual only — never polled, never
+  // AI). Reuses the existing snapshot path; the watched state file
+  // updates the rail when the write lands.
+  function refreshNow() {
+    if (root.refreshing) return
+    root.refreshing = true
+    refreshProc.running = true
+  }
+
+  Process {
+    id: refreshProc
+    command: ["pitwall", "snapshot"]
+    stdout: StdioCollector {}
+    stderr: StdioCollector {}
+    onExited: function(code) {
+      root.refreshing = false
+      refreshButton.rotation = 0
+      if (code !== 0) console.warn("pitwall", "snapshot refresh exited", code)
+      stateReader.refresh()
+    }
   }
 
   Process {
@@ -335,7 +360,14 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        if (root.selectedId !== "") {
+          root.selectedId = ""
+          root.hoveredId = ""
+        } else {
+          root.close()
+        }
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onActivateRequested: {
         if (root.selectedSession()) root.focusSession(root.selectedSession())
@@ -380,27 +412,50 @@ Panel {
                 visible: status !== Image.Error
               }
 
-              Text {
-                textFormat: Text.PlainText
+              // Single wordmark (split-color, palette-bound).
+              Row {
                 anchors.verticalCenter: parent.verticalCenter
-                // Split wordmark: base + accent tail, palette-bound.
-                text: "PIT"
-                color: Color.foreground
-                font.family: Style.font.family
-                font.pixelSize: Style.font.body
-                font.bold: true
-                renderType: Text.NativeRendering
-              }
+                spacing: 0
 
-              Text {
-                textFormat: Text.PlainText
-                anchors.verticalCenter: parent.verticalCenter
-                text: "WALL"
-                color: Color.accent
-                font.family: Style.font.family
-                font.pixelSize: Style.font.body
-                font.bold: true
-                renderType: Text.NativeRendering
+                Text {
+                  textFormat: Text.PlainText
+                  text: "PIT"
+                  color: Color.foreground
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                  renderType: Text.NativeRendering
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "WALL"
+                  color: Color.accent
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                  renderType: Text.NativeRendering
+                }
+              }
+            }
+
+            PanelActionButton {
+              id: refreshButton
+              anchors.right: gearButton.left
+              anchors.rightMargin: Style.space(2)
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: String.fromCodePoint(0xF0450)
+              tooltipText: "Refresh workspace state (no AI)"
+              focusable: true
+              onClicked: root.refreshNow()
+
+              NumberAnimation on rotation { // reset by onExited (see refreshProc)
+                running: root.refreshing
+                loops: Animation.Infinite
+                from: 0
+                to: 360
+                duration: 900
+                easing.type: Easing.OutCubic
               }
             }
 
@@ -484,11 +539,6 @@ Panel {
               width: parent.width
               spacing: Style.space(4)
 
-              PanelSectionHeader {
-                width: parent.width
-                text: "AI SUMMARY"
-              }
-
               Item {
                 width: parent.width
                 height: summaryBody.implicitHeight
@@ -559,6 +609,19 @@ Panel {
                   onClicked: root.generateSummary()
                 }
 
+                PanelActionButton {
+                  visible: !!root.summary && !root.generating
+                  iconText: String.fromCodePoint(0xF0218)
+                  tooltipText: "Clear displayed summary (cache only)"
+                  focusable: true
+                  onClicked: {
+                    runFixed(["pitwall", "summarize", "--clear"], function(code) {
+                      if (code !== 0) console.warn("pitwall", "summary clear exited", code)
+                      stateReader.refresh()
+                    })
+                  }
+                }
+
                 Text {
                   visible: root.generating
                   textFormat: Text.PlainText
@@ -581,7 +644,7 @@ Panel {
               }
             }
 
-            // ---- session rail ----
+            // ---- session rail (newest first) ----
             Repeater {
               model: root.liveSessions
               delegate: SessionBar {
@@ -591,106 +654,26 @@ Panel {
                 frac: root.barFrac(modelData.age_secs)
                 selected: root.selectedId === modelData.id
                 dimmed: root.selectedId !== "" && root.selectedId !== modelData.id
+                showCard: root.selectedId === modelData.id
+                detailText: root.detailFor(modelData, false)
+                canFocus: true
+                canStop: true
+                canClose: true
+                canResume: false
                 onClicked: {
-                  root.selectedId = (root.selectedId === modelData.id) ? "" : modelData.id
+                  var id = modelData.id
+                  root.selectedId = (root.selectedId === id) ? "" : id
                 }
                 onHovered: function(h) {
                   root.hoveredId = h ? modelData.id : ""
                 }
+                onFocusRequested: root.focusSession(modelData)
+                onStopRequested: root.stopSession(modelData)
+                onCloseRequested: root.closeSession(modelData)
               }
             }
 
-            // ---- attached toast for hovered/pinned session ----
-            Rectangle {
-              visible: root.toastEntry() !== null
-              width: parent.width
-              height: toastColumn.implicitHeight + Style.space(16)
-              color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.05)
-              border.width: 1
-              border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.22)
-
-              Behavior on opacity {
-                NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
-              }
-
-              Column {
-                id: toastColumn
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: Style.space(8)
-                spacing: Style.space(4)
-
-                Text {
-                  width: parent.width
-                  textFormat: Text.PlainText
-                  wrapMode: Text.Wrap
-                  maximumLineCount: 4
-                  elide: Text.ElideRight
-                  text: root.toastText()
-                  color: Color.foreground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  renderType: Text.NativeRendering
-                }
-
-                Row {
-                  spacing: Style.space(4)
-
-                  PanelActionButton {
-                    visible: root.toastIsLive()
-                    iconText: String.fromCodePoint(0xF034E)
-                    tooltipText: "Focus terminal"
-                    focusable: true
-                    onClicked: {
-                      var s = root.toastEntry()
-                      if (s) root.focusSession(s)
-                    }
-                  }
-
-                  PanelActionButton {
-                    visible: root.toastIsLive()
-                    iconText: "■"
-                    tooltipText: "Stop session processes (SIGTERM)"
-                    focusable: true
-                    onClicked: {
-                      var s = root.toastEntry()
-                      if (s) root.stopSession(s)
-                    }
-                  }
-
-                  PanelActionButton {
-                    visible: root.toastIsLive()
-                    iconText: "✕"
-                    tooltipText: "Close window"
-                    focusable: true
-                    onClicked: {
-                      var s = root.toastEntry()
-                      if (s) root.closeSession(s)
-                    }
-                  }
-
-                  PanelActionButton {
-                    visible: !root.toastIsLive() && root.toastEntry() !== null
-                    iconText: "▶"
-                    tooltipText: root.resumeTooltip()
-                    focusable: true
-                    onClicked: {
-                      var s = root.toastEntry()
-                      if (s) root.resumeCheckpoint(String(s.session_id || ""))
-                    }
-                  }
-                }
-              }
-            }
-
-            // ---- resumable history rail ----
-            PanelSectionHeader {
-              visible: root.resumable.length > 0
-              width: parent.width
-              text: "RESUME"
-            }
-
+            // ---- resumable history rail (same language, muted) ----
             Repeater {
               model: Math.min(root.resumable.length, 5)
               delegate: SessionBar {
@@ -700,6 +683,13 @@ Panel {
                 frac: 0.25
                 selected: root.selectedId === ("r:" + root.resumable[index].session_id)
                 dimmed: root.selectedId !== "" && root.selectedId !== ("r:" + root.resumable[index].session_id)
+                showCard: root.selectedId === ("r:" + root.resumable[index].session_id)
+                detailText: root.detailFor(root.resumable[index], true)
+                canFocus: false
+                canStop: false
+                canClose: false
+                canResume: true
+                resumeTooltip: root.resumeTooltipFor(root.resumable[index])
                 onClicked: {
                   var sid = "r:" + root.resumable[index].session_id
                   root.selectedId = (root.selectedId === sid) ? "" : sid
@@ -707,6 +697,7 @@ Panel {
                 onHovered: function(h) {
                   root.hoveredId = h ? ("r:" + root.resumable[index].session_id) : ""
                 }
+                onResumeRequested: root.resumeCheckpoint(String(root.resumable[index].session_id || ""))
               }
             }
 
@@ -726,7 +717,8 @@ Panel {
     }
   }
 
-  // ---- selection + toast model ----
+  // ---- selection model: pinned clicks only. Hover highlights bars
+  // (SessionBar hovered flag) but never opens, moves, or steals a card.
   function selectedSession() {
     return findEntry(selectedId)
   }
@@ -746,24 +738,12 @@ Panel {
     return null
   }
 
-  function hoveredSession() {
-    if (hoveredId === "" || hoveredId === selectedId) return null
-    return findEntry(hoveredId)
-  }
-
-  function toastEntry() {
-    return selectedSession() || hoveredSession()
-  }
-
-  function toastIsLive() {
-    var s = toastEntry()
-    return !!s && s.id !== undefined
-  }
-
-  function toastText() {
-    var s = toastEntry()
+  // Detail text for a pinned card. Live sessions: deterministic detail
+  // (never AI-inferred). Resumable: checkpoint facts. Caller passes the
+  // entry directly, so hover state can never reroute content.
+  function detailFor(s, isResumable) {
     if (!s) return ""
-    if (s.id !== undefined) {
+    if (!isResumable) {
       // Live session: deterministic detail (never AI-inferred).
       var parts = []
       var a = s.agent || {}
@@ -791,8 +771,7 @@ Panel {
     return bits.join("\n")
   }
 
-  function resumeTooltip() {
-    var s = toastEntry()
+  function resumeTooltipFor(s) {
     var dir = s ? String(s.project_dir || "") : ""
     if (dir === "") return "Resume unavailable"
     return "Resume: open terminal at " + dir

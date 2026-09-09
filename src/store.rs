@@ -890,6 +890,17 @@ impl Store {
         Ok(row)
     }
 
+    /// Delete all cached summaries (user-initiated clear). Checkpoints,
+    /// observations, and sessions are untouched — only the interpretation
+    /// cache is dropped. Returns rows removed.
+    pub fn clear_summaries(&self) -> Result<i64, StoreError> {
+        let n = self
+            .conn
+            .execute("DELETE FROM summaries", [])
+            .map_err(StoreError::from)?;
+        Ok(n as i64)
+    }
+
     /// Number of cached summaries (bounded in practice by hash cardinality;
     /// one row per distinct workspace context).
     pub fn summary_count(&self) -> Result<i64, StoreError> {
@@ -1610,6 +1621,30 @@ mod tests {
         assert_eq!(store.session_history("sess_h", 16).unwrap(), "SR");
         assert_eq!(store.session_history("sess_h", 1).unwrap(), "R");
         let _ = obs1;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn summaries_clear_removes_only_summaries() {
+        let dir = test_dir("sum-clear");
+        let store = Store::open(&dir.join("pitwall.db")).unwrap();
+        store.store_summary("fnv:a", "A.", None, 1).unwrap();
+        store.store_summary("fnv:b", "B.", None, 2).unwrap();
+        assert_eq!(store.summary_count().unwrap(), 2);
+        assert_eq!(store.clear_summaries().unwrap(), 2);
+        assert_eq!(store.summary_count().unwrap(), 0);
+        assert_eq!(store.latest_summary().unwrap(), None);
+        // Other tables untouched (meta probe).
+        let tables: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(tables.contains(&"checkpoints".to_string()));
+        assert!(tables.contains(&"observations".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

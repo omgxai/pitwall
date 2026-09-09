@@ -7,6 +7,10 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M5f interaction polish: pin-stable hover/click model, in-delegate
+  detail cards, single-word header + refresh + gear, caption-free
+  ticker, heading-free rail, validated action row, summary trash via
+  `summarize --clear`.
 - M5f session timeline rail: collapsed flag button; header + gear;
   AI summary ticker; duration/history bars newest-first; hover/pin
   toast with deterministic detail; Focus/Stop/Resume/Close actions;

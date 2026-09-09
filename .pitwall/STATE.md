@@ -377,9 +377,41 @@
   zero QML errors; resume/focus/stop-argv/config proven via CLI;
   schema verified (5 tables + summaries, no text columns).
 
+## Completed work (M5f polish / interaction fix)
+
+- [x] Pin-stable interaction: hover highlights only; click pins; toast
+  card lives inside its own bar delegate (stable geometry, no dead
+  zone, no overlap); Esc clears selection first, then closes.
+- [x] Header: single-word PITWALL (split-color) + refresh (md-refresh,
+  spins while running) + gear. Refresh spawns `pitwall snapshot`
+  (state only, never AI) on expand + manual click.
+- [x] Density: AI SUMMARY caption removed; RESUME heading removed
+  (history rows flow muted); toast is the only detail surface.
+- [x] Actions per selection: Focus/Stop-SIGTERM/Close (live),
+  Resume (history); explicit clicks; validated inputs; no delete.
+- [x] Summary trash: `summarize --clear` (cache-only) + panel button.
+- [x] Found + fixed live: Repeater `onHovered` vs `hoverChanged`
+  signal mismatch (widget failed to instantiate; caught via journal).
+- [x] Screenshots: rail + ticker + RESUME rows + collapsed flag, all
+  native-proportioned, zero QML errors.
+
+## Known problems / limits (polish)
+
+- Physical click/tap/hover/scroll untestable headlessly (no input
+  tool): click/hover/scroll paths code-reviewed against kit patterns;
+  CLI equivalents proven (focus, resume, SIGTERM argv, config).
+- Settings view + selected card visuals not screenshotted (need a
+  click); components use verified kit APIs; panel opens error-free.
+- 6+ sessions and vertical bar untested live.
+
+## Tests performed (polish, 2026-09-10)
+
+- `cargo fmt --check` clean; 104 tests passed; clippy clean.
+- No Rust behavior change except `summarize --clear` (+1 test).
+
 ## Exact next step
 
-- Commit + push M5f, then STOP (no M5g without instruction).
+- Commit + push polish, then STOP (no M5g without instruction).
 
 ## Completed work (M0 archive)
 

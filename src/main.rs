@@ -40,7 +40,7 @@ fn print_help() {
     println!("    summarize        Ask the configured agent for a workspace summary");
     println!("    config             Get/set user configuration (get [key] | set <key> <value>)");
     println!("                     [--agent ID] [--model P/M] [--dir DIR]");
-    println!("                     [--timeout SECS] [--dry-run] [--data-dir DIR]");
+    println!("                     [--timeout SECS] [--dry-run] [--clear] [--data-dir DIR]");
 }
 
 #[cfg(target_os = "linux")]
@@ -490,6 +490,7 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
     let mut dir_override: Option<String> = None;
     let mut timeout_secs = summary_mod::DEFAULT_TIMEOUT_SECS;
     let mut dry_run = false;
+    let mut clear_only = false;
     let mut data_dir: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
@@ -519,6 +520,7 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
                 }
             }
             "--dry-run" => dry_run = true,
+            "--clear" => clear_only = true,
             "--data-dir" => {
                 i += 1;
                 data_dir = args.get(i).map(PathBuf::from);
@@ -529,6 +531,51 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
             }
         }
         i += 1;
+    }
+
+    if clear_only {
+        let dir = data_dir.clone().unwrap_or_else(store::default_data_dir);
+        let db = dir.join(store::DB_FILENAME);
+        let store = match store::Store::open(&db) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("pitwall summarize: store unavailable ({e})");
+                return ExitCode::from(1);
+            }
+        };
+        match store.clear_summaries() {
+            Ok(n) => eprintln!(
+                "summary cache cleared ({} {})",
+                n,
+                if n == 1 { "entry" } else { "entries" }
+            ),
+            Err(e) => {
+                eprintln!("pitwall summarize: clear failed ({e})");
+                return ExitCode::from(1);
+            }
+        }
+        // Refresh the artifact so the panel drops the text (same contract
+        // as `snapshot`; degradable throughout).
+        let snapshot = collector::collect(&platform());
+        let live: std::collections::HashSet<&str> =
+            snapshot.sessions.iter().map(|s| s.id.as_str()).collect();
+        let resumable: Vec<store::Checkpoint> = store
+            .latest_checkpoints(10)
+            .map(|cps| {
+                cps.into_iter()
+                    .filter(|c| !live.contains(c.session_id.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let meta = session_meta_map(&store, &snapshot);
+        let state_path = dir.join(store::STATE_FILENAME);
+        let payload =
+            output::snapshot_to_state_json(&snapshot, &resumable, None, &meta, &load_config_echo());
+        match store::atomic_write(&state_path, payload.as_bytes()) {
+            Ok(()) => eprintln!("pitwall summarize: state artifact {}", state_path.display()),
+            Err(e) => eprintln!("pitwall summarize: warning: state artifact not written ({e})"),
+        }
+        return ExitCode::SUCCESS;
     }
 
     let plat = platform();
