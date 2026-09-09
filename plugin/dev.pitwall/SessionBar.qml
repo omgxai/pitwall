@@ -78,7 +78,13 @@ Column {
         kind = "shell"
       }
     }
-    return confGlyph + " " + kind + " · " + projectName + branchText
+    var label = confGlyph + " " + kind + " · " + projectName + branchText
+    // Tiny process count (tooltip/detail carry the words, not the rail).
+    var procs = (entry && entry.process_count !== undefined) ? Number(entry.process_count) : -1
+    if (procs >= 0) label += "  · " + procs
+    // Expand affordance: the card (not a new list) opens beneath this bar.
+    label += selected ? "  ▴" : "  ▾"
+    return label
   }
   // History segments: R running, S present-but-quiet, U unknown.
   // Only samples the record contains; never filler.

@@ -14,7 +14,8 @@
 - **M5c — Ephemeral AI workspace context**: COMPLETE, pushed (`99c6fae`).
 - **M5d Part 1 — Summary persistence + state v3**: COMPLETE, pushed (`41aaa03`).
 - **M5e — Pixel flag identity**: COMPLETE, pushed (`63a85e8`).
-- **M5f — Session timeline rail**: COMPLETE (pending commit/push below).
+- **M5f — Session timeline rail**: COMPLETE, pushed (`09106f9` + polish `b193021`).
+- **M5f final polish — rail UX freeze**: COMPLETE (pending commit/push below).
 
 ## Completed work
 
@@ -409,9 +410,38 @@
 - `cargo fmt --check` clean; 104 tests passed; clippy clean.
 - No Rust behavior change except `summarize --clear` (+1 test).
 
+## Completed work (M5f final polish)
+
+- [x] Rail labels: confidence glyphs only (`●/○/?`), process count
+  (`· N`), expander affordance (`▾/▴`); no literal unknown/low/high
+  in the rail. App windows labeled by class; resumable has no count
+  (unknown, not zero).
+- [x] Grouping verified by construction: one bar per window-rooted
+  session (3 windows → 3 bars live); children never create bars.
+  Child names deliberately excluded from state (privacy); the card
+  itself is the expansion surface.
+- [x] Ticker clamped to ~160 chars + `→` affordance; click expands;
+  explicit Needs-attention line only from cached text; trash orphan
+  removed (clear stays a CLI capability).
+- [x] Detail cards gain a state word (active/idle/waiting/unknown)
+  with non-destructive semantics; no kill/delete recommendations.
+- [x] Screenshots: compact rail verified live (segments, counts,
+  muted history, ticker, header); zero QML errors.
+
+## Remaining work (next)
+
+- M5g hardening/release per approved plan. M5 UI is now FROZEN.
+  Awaiting instruction. Do NOT start unapproved scope.
+
+## Tests performed (final polish, 2026-09-10)
+
+- `cargo fmt --check` clean; 104 tests passed; clippy clean.
+- No Rust behavior change in this pass (QML + docs only).
+- Secret scan clean.
+
 ## Exact next step
 
-- Commit + push polish, then STOP (no M5g without instruction).
+- Commit + push final polish, then STOP. M5 UI FROZEN.
 
 ## Completed work (M0 archive)
 

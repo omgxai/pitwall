@@ -599,6 +599,21 @@ Panel {
                 }
               }
 
+              // Needs-attention line: only when the cached summary
+              // explicitly contains such a section. Never invented.
+              Text {
+                visible: root.attentionText() !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                maximumLineCount: 1
+                text: "! " + root.attentionText()
+                color: Color.urgent
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                renderType: Text.NativeRendering
+              }
+
               Row {
                 width: parent.width
                 spacing: Style.space(8)
@@ -607,19 +622,6 @@ Panel {
                   visible: !root.summary && !root.generating
                   text: "Generate summary"
                   onClicked: root.generateSummary()
-                }
-
-                PanelActionButton {
-                  visible: !!root.summary && !root.generating
-                  iconText: String.fromCodePoint(0xF0218)
-                  tooltipText: "Clear displayed summary (cache only)"
-                  focusable: true
-                  onClicked: {
-                    runFixed(["pitwall", "summarize", "--clear"], function(code) {
-                      if (code !== 0) console.warn("pitwall", "summary clear exited", code)
-                      stateReader.refresh()
-                    })
-                  }
                 }
 
                 Text {
@@ -745,7 +747,15 @@ Panel {
     if (!s) return ""
     if (!isResumable) {
       // Live session: deterministic detail (never AI-inferred).
+      // State words describe the observation only: active = running now,
+      // idle = sleeping, waiting = stopped job present, unknown = unclear.
+      // Sleeping/idle never implies useless or safe-to-kill.
       var parts = []
+      var sstate = String(s.state || "unknown")
+      var stateWord = sstate === "running" ? "active"
+        : sstate === "sleeping" ? "idle"
+        : sstate === "stopped" ? "waiting" : "unknown"
+      parts.push("state  " + stateWord)
       var a = s.agent || {}
       parts.push("agent  " + String(a.kind || "unknown") + " · " + String(a.confidence || "unknown"))
       var w = s.window || null
@@ -777,10 +787,34 @@ Panel {
     return "Resume: open terminal at " + dir
   }
 
+  // Ticker shows a compact slice of the cached summary (word-bounded
+  // ~160 chars + continuation mark). Full text opens on click. Never
+  // the whole paragraph: the rail is an instrument, not a reader.
   function summaryText() {
-    if (!summary) return "No summary yet."
-    if (summary.status === "error") return "Summary unavailable."
-    return String(summary.text || "No summary yet.")
+    var full = summaryShort()
+    if (full === "") return "No summary yet."
+    if (full.length <= 170) return full
+    var cut = full.slice(0, 160)
+    var sp = cut.lastIndexOf(" ")
+    if (sp > 100) cut = cut.slice(0, sp)
+    return cut + " →"
+  }
+
+  function summaryShort() {
+    if (!summary) return ""
+    if (summary.status === "error") return ""
+    return String(summary.text || "").replace(/\s+/g, " ").trim()
+  }
+
+  // "Needs attention" line, only when the cached summary explicitly
+  // contains such a section. Otherwise absent (never invented).
+  function attentionText() {
+    if (!summary || summary.status !== "ready") return ""
+    var m = String(summary.text || "").match(/needs attention:?([^\n]*)/i)
+    if (!m) return ""
+    var line = m[1].trim().replace(/\s+/g, " ")
+    if (line === "") return ""
+    return line.length > 140 ? line.slice(0, 137) + "…" : line
   }
 
   function modelValue() {
