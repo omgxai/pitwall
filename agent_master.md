@@ -66,8 +66,55 @@ Complete. Awaiting user direction.
 
 ---
 
+## 2026-09-10 — Dogfood wave 1: real child agents observed (PRE)
+
+### Objective
+Make the Master/Child model real: launch 2 OpenCode children in
+separate Omarchy terminals, verify Pitwall detection, assign audits,
+review reports, prioritize.
+
+### Implementation
+- Launched via `setsid foot --working-directory ~/Projects/pitwall
+  --app-id org.omarchy.agent --title … opencode --auto --prompt …`
+  (native mechanism, mirrors user agent terminal). First attempt used
+  wrong cwd (`/home/guru/Work`); killed both, relaunched rooted —
+  no stray files, verified reaped.
+- Child 1 (UI audit) + Child 2 (systems audit), read-only scope,
+  single-file write allowance each, no commits.
+- `pitwall snapshot` + panel screenshot verification.
+
+### Verified result
+- Detection: 5 windows → 5 sessions (PRE + 2 children opencode/high
+  with distinct titles, foot unknown/low, chromium app/unknown).
+  Natural discovery, no synthetic state.
+- Grouping: window-rooted confirmed; ? shell rows are distinct
+  terminal roots (keep separate — §19 answered, no fix).
+- Privacy: DB 18 cols + state keys clean (no argv/env/evidence).
+- Hierarchy gap CONFIRMED: recency-only ordering, no semantic
+  categories (Pitwall-native/agent/app/system) — M5g design item.
+- UI findings accepted to M5g backlog: twin disambiguation, summary-
+  freshness signal, `? terminal` label, live-unknown vs resumable
+  color, transient/zombie count nuance (design TBD, not a hack).
+- Crash notification during wave investigated: restart-teardown
+  SI_TKILL artifact, shell healthy, dismissed.
+
+### Tests
+- `pitwall status --json` live (5 sessions); panel screenshots;
+  no Rust/QML changes this wave (audit-only).
+
+### Status
+Wave 1 complete. Children COMPLETE (reports in), still running
+(PIDs available on request). Their 4 log files left UNCOMMITTED
+per no-commit-others'-work rule — need child commit or wave 2.
+
+---
+
 ## CURRENT STATE
 
-- Latest verified commit: `124be9a` (== origin/main, tree clean).
-- Active child agents: NONE (inbox tasks queued, unstaffed).
-- Next action: user decides — M5g hardening kickoff or child staffing.
+- Latest verified commit: evolving this wave (verify at push).
+- Active child agents: Child 1 + Child 2 COMPLETE but sessions alive
+  (awaiting follow-up or dismissal).
+- M5g backlog (prioritized): semantic display hierarchy; twin
+  disambiguation; summary-freshness signal; unknown label/color;
+  transient/zombie count semantics.
+- Next action: user decides — child log commit, M5g kickoff, or stand down.

@@ -8,3 +8,8 @@
 - D4 (2026-09-10): Next phase is M5g hardening, not features.
 - D5 (2026-09-10): Coordination files (`agent_*.md`, `.agents/`) are
   committed to the repo like `.pitwall/STATE.md` — shared memory.
+- D6 (2026-09-10, dogfood wave 1): ? shell rows are distinct terminal
+  roots — keep separate, no merge. Display hierarchy (semantic
+  categories) is M5g design work, not a hotfix. Transient/zombie
+  process counting needs design before any filter. Never commit
+  another agent's files.
