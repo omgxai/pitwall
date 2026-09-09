@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format check
+        run: cargo fmt --check
+      - name: Tests
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on suspected committed secrets
+        run: |
+          # Lightweight pattern scan (M0). No keys, tokens, or private material
+          # may ever be committed. See SECURITY.md.
+          if grep -RInE --exclude-dir=.git --exclude-dir=target \
+            -e 'sk-(live|test)-[A-Za-z0-9]{8,}' \
+            -e 'xox[bpas]-[A-Za-z0-9-]{8,}' \
+            -e 'gh[pousr]_[A-Za-z0-9]{8,}' \
+            -e 'AKIA[0-9A-Z]{16}' \
+            -e '-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----' \
+            . ; then
+            echo "secret-scan: suspected credential pattern found" >&2
+            exit 1
+          fi
+          echo "secret-scan: clean"

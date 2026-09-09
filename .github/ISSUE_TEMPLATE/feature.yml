@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a small, scope-conscious improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem (what workspace moment hurts today?)
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal (smallest useful version)
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: Local-first (no cloud/backend required)
+        - label: Low weight (no heavy deps or polling)
+        - label: Omarchy-native (fits the bar-widget model)

@@ -1,0 +1,29 @@
+# Generated files
+/target/
+Cargo.lock
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Local Pitwall runtime data (never commit live state or secrets)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.pitwall/local/
+state.json
+
+# Secrets (never commit API keys, tokens, or keyrings)
+.env
+.env.*
+*.pem
+*.key
+config/*.toml
+!config/*.example.toml
+
+# Omarchy plugin build artifacts
+plugin/**/*.zip

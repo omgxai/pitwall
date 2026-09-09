@@ -1,0 +1,25 @@
+[package]
+name = "pitwall"
+version = "0.1.0"
+edition = "2021"
+description = "AI workspace awareness and continuity layer for Omarchy developers"
+license = "MIT"
+# repository = "<set when the public GitHub repo exists>"
+keywords = ["omarchy", "workspace", "developer-tools"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "pitwall"
+path = "src/main.rs"
+
+[lib]
+name = "pitwall_lib"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1

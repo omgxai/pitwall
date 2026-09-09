@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a reproducible problem with Pitwall
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Pitwall version
+      description: Output of `pitwall --version`
+    validations:
+      required: true
+  - type: input
+    id: omarchy
+    attributes:
+      label: Omarchy / Hyprland versions
+      description: e.g. output of `cat /usr/share/omarchy/version` and `hyprctl version | head -3`
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (redact secrets first — never paste API keys)

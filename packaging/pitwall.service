@@ -1,0 +1,17 @@
+[Unit]
+Description=Pitwall workspace awareness daemon
+Documentation=https://github.com/pitwall/pitwall
+# M0 stub: ExecStart and full unit wiring land with the daemon (M2).
+# Standard layout (planned):
+#   ExecStart=%h/.local/bin/pitwall daemon
+#   Restart=on-failure
+After=graphical-session.target
+
+[Service]
+Type=simple
+# ExecStart=%h/.local/bin/pitwall daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
