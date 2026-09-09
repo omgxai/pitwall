@@ -15,7 +15,9 @@
 - **M5d Part 1 — Summary persistence + state v3**: COMPLETE, pushed (`41aaa03`).
 - **M5e — Pixel flag identity**: COMPLETE, pushed (`63a85e8`).
 - **M5f — Session timeline rail**: COMPLETE, pushed (`09106f9` + polish `b193021`).
-- **M5f final polish — rail UX freeze**: COMPLETE (pending commit/push below).
+- **M5f final polish — rail UX freeze**: COMPLETE, pushed (`c57e6f9`).
+- **PRE established**: Race Engineer online 2026-09-10; coordination
+  files created (`agent_master.md`, child stories, `.agents/`).
 
 ## Completed work
 
