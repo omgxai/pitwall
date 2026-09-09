@@ -7,6 +7,9 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M1 workspace discovery: `platform` trait + Linux impl, `collector` with
+  confidence states and stable `proj_`/`sess_` IDs, `pitwall status [--json]`
+  (JSON schema v1), 23 unit tests with fixtures/mocks.
 - M0 project foundation: Rust crate scaffold (`pitwall` CLI + `pitwall_lib`),
   MIT license, README, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, ROADMAP,
   CHANGELOG, `.gitignore`, GitHub templates, CI skeleton, ADRs 001–006,

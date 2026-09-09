@@ -1,8 +1,13 @@
 //! Pitwall core library.
 //!
-//! M0: crate skeleton only. Functional modules (collector, state,
-//! summary, platform) land in M1+ behind the `platform` abstraction
-//! so OS-specific code never leaks into the core.
+//! M1: workspace/process discovery. The [`collector`] module owns the
+//! normalized snapshot types; [`platform`] isolates OS-specific detection
+//! behind a trait so the core never touches OS APIs directly.
+
+pub mod collector;
+pub mod ids;
+pub mod output;
+pub mod platform;
 
 /// Crate version string, kept in sync with `Cargo.toml`.
 pub fn version() -> &'static str {

@@ -1,0 +1,26 @@
+[
+  {
+    "address": "0xaaaafa4573b0",
+    "mapped": true,
+    "hidden": false,
+    "class": "org.omarchy.agent",
+    "title": "OC | Pitwall AI workspace awareness MVP",
+    "initialClass": "org.omarchy.agent",
+    "initialTitle": "foot",
+    "pid": 328892,
+    "workspace": { "id": 1, "name": "1" },
+    "focusHistoryID": 2
+  },
+  {
+    "address": "0xaaaafa40b430",
+    "mapped": true,
+    "hidden": false,
+    "class": "foot",
+    "title": "guru@guru-001:~",
+    "initialClass": "foot",
+    "initialTitle": "foot",
+    "pid": 351520,
+    "workspace": { "id": 1, "name": "1" },
+    "focusHistoryID": 3
+  }
+]

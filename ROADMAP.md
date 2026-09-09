@@ -7,6 +7,7 @@ until M(n) is stable and committed.
   docs, ADRs, CI skeleton, `.pitwall/STATE.md`, packaging stub.
 - [ ] **M1 — Workspace/process discovery**: `/proc` + `hyprctl clients -j`
   collector; `pitwall status --json` lists real terminals/sessions/processes.
+  (Implemented, pending commit/push.)
 - [ ] **M2 — Local state**: SQLite schema + snapshot JSON + systemd user unit;
   restart-safe, low CPU.
 - [ ] **M3 — Omarchy panel prototype**: `dev.pitwall` bar-widget (indicator +
