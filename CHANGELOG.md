@@ -7,6 +7,10 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M5a evidence + discovery: `/proc` exe basename signal, window roles
+  (terminal/app/unknown; no agent inference for apps), honest Unknown
+  (`terminal context only`), additive `role` in JSON outputs,
+  `pitwall agents` / `pitwall models` over a fixed validated table.
 - M4 checkpoints + Resume: severity-ordered session state; `checkpoints`
   table (schema v2, manual/disappearance triggers, 25/project + 500
   retention, 280-char notes); `pitwall checkpoint` / `pitwall resume`

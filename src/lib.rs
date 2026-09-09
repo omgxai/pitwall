@@ -4,6 +4,7 @@
 //! normalized snapshot types; [`platform`] isolates OS-specific detection
 //! behind a trait so the core never touches OS APIs directly.
 
+pub mod agents;
 pub mod collector;
 pub mod ids;
 pub mod output;

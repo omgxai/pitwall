@@ -77,11 +77,20 @@ fn read_one_proc(pid: u32) -> Option<RawProcess> {
     let cwd = std::fs::read_link(format!("{base}/cwd"))
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // Basename only: full exe paths leak versions, usernames, and layout.
+    let exe_name = std::fs::read_link(format!("{base}/exe"))
+        .map(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     Some(RawProcess {
         pid,
         ppid: fields.ppid,
         name,
         command,
+        exe_name,
         cwd,
         state_code: fields.state_code,
         starttime_ticks: fields.starttime_ticks,

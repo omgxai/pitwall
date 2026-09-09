@@ -206,9 +206,40 @@
   state v2 + resumable rendered in panel; screenshots inspected.
 - Secret scan — clean (results at commit time).
 
+## Completed work (M5a)
+
+- [x] `/proc/PID/exe` basename signal (`RawProcess.exe_name`,
+  `ProcessInfo.exe_name`); independent `exe:` evidence in classifier.
+- [x] Window roles: `role_for_class` (verified terminal classes;
+  else app; empty unknown). Agent inference skipped for App.
+- [x] Honest Unknown: terminal + no signals → Unknown/Low with
+  `terminal context only`; App → Unknown/Unknown/empty.
+- [x] `role` added additively to status JSON + state.json sessions.
+- [x] `pitwall agents` (PATH scan over fixed table) + `pitwall models`
+  (opencode list; agent-default fallback; refusals). Validated: claude
+  `--model`, codex `exec -m`; hermes/aider/gemini excluded (documented).
+- [x] Live: chromium/screensaver → app; foot → low honest unknown;
+  opencode high unchanged; agents/models commands work on real tools.
+
+## Remaining work (next)
+
+- M5b: derived activity events (read-time diff, no new tables).
+
+## Known problems / limits (M5a)
+
+- Role allowlist is static; exotic terminals classify Unknown (safe:
+  inference still runs, panel shows distinctly).
+- Claude/codex model LIST unvalidated → Agent default (documented).
+
+## Tests performed (M5a, 2026-09-09)
+
+- `cargo fmt --check` clean; `cargo test` 70 passed; clippy clean.
+- Hermetic discovery tests (temp dirs, no PATH mutation).
+- Live: agents/models/status verified against real tools (above).
+
 ## Exact next step
 
-- Commit + push M4, then await instruction (M5 or release).
+- Commit + push M5a, then begin M5b (derived events).
 
 ## Completed work (M0 archive)
 

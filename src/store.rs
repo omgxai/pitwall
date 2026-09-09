@@ -847,7 +847,7 @@ mod tests {
     use super::*;
     use crate::collector::{
         AgentIdentity, AgentKind, Confidence, ProcessInfo, ProcessState, ProjectInfo, SessionState,
-        TerminalSession, WorkspaceSnapshot, LAST_ACTIVITY_KIND,
+        TerminalSession, WindowRole, WorkspaceSnapshot, LAST_ACTIVITY_KIND,
     };
     use crate::platform::WindowInfo;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -874,6 +874,7 @@ mod tests {
                 pid: 10,
             }),
             root_pid: 10,
+            role: WindowRole::Terminal,
             project: Some(ProjectInfo {
                 id: "proj_abc".to_string(),
                 dir: "/home/u/Work".to_string(),
@@ -895,6 +896,7 @@ mod tests {
                 name: "opencode".to_string(),
                 // Deliberately secret-bearing: must NEVER reach SQLite.
                 command: "opencode --token hunter2-supersecret --api-key ABC123".to_string(),
+                exe_name: "opencode".to_string(),
                 cwd: "/home/u/Work".to_string(),
                 state: ProcessState::Running,
                 started_at_epoch: 1_700_000_001,

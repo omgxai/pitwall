@@ -98,7 +98,7 @@ pub fn snapshot_to_json(s: &WorkspaceSnapshot) -> String {
         }
         processes.push(']');
         out.push_str(&format!(
-            "{{\"id\":{},\"root_pid\":{},\"state\":{},\"process_count\":{},\"window\":{},\"project\":{},\"agent\":{{\"kind\":{},\"confidence\":{},\"evidence\":{}}},\"last_activity\":{{\"epoch\":{},\"kind\":{}}},\"summary\":{},\"processes\":{}}}",
+            "{{\"id\":{},\"root_pid\":{},\"state\":{},\"process_count\":{},\"window\":{},\"project\":{},\"agent\":{{\"kind\":{},\"confidence\":{},\"evidence\":{}}},\"last_activity\":{{\"epoch\":{},\"kind\":{}}},\"summary\":{},\"processes\":{},\"role\":{}}}",
             q(&sess.id),
             sess.root_pid,
             q(sess.state.as_str()),
@@ -111,7 +111,8 @@ pub fn snapshot_to_json(s: &WorkspaceSnapshot) -> String {
             sess.last_activity_epoch,
             q(sess.last_activity_kind),
             q(&sess.summary),
-            processes
+            processes,
+            q(sess.role.as_str())
         ));
     }
     out.push_str("]}");
@@ -217,7 +218,7 @@ pub fn snapshot_to_state_json(s: &WorkspaceSnapshot, resumable: &[Checkpoint]) -
             )
         });
         out.push_str(&format!(
-            "{{\"id\":{},\"state\":{},\"process_count\":{},\"project\":{},\"agent\":{{\"kind\":{},\"confidence\":{}}},\"window\":{},\"last_activity\":{{\"epoch\":{},\"kind\":{}}},\"summary\":{}}}",
+            "{{\"id\":{},\"state\":{},\"process_count\":{},\"project\":{},\"agent\":{{\"kind\":{},\"confidence\":{}}},\"window\":{},\"last_activity\":{{\"epoch\":{},\"kind\":{}}},\"summary\":{},\"role\":{}}}",
             q(&sess.id),
             q(sess.state.as_str()),
             sess.process_count,
@@ -227,7 +228,8 @@ pub fn snapshot_to_state_json(s: &WorkspaceSnapshot, resumable: &[Checkpoint]) -
             window,
             sess.last_activity_epoch,
             q(sess.last_activity_kind),
-            q(&sess.summary)
+            q(&sess.summary),
+            q(sess.role.as_str())
         ));
     }
     out.push_str("],\"resumable\":[");
@@ -261,7 +263,7 @@ mod tests {
     use super::*;
     use crate::collector::{
         AgentIdentity, AgentKind, Confidence, ProcessInfo, ProcessState, ProjectInfo, SessionState,
-        TerminalSession, WorkspaceSnapshot, LAST_ACTIVITY_KIND,
+        TerminalSession, WindowRole, WorkspaceSnapshot, LAST_ACTIVITY_KIND,
     };
     use crate::platform::WindowInfo;
 
@@ -281,6 +283,7 @@ mod tests {
                     pid: 10,
                 }),
                 root_pid: 10,
+                role: WindowRole::Terminal,
                 project: Some(ProjectInfo {
                     id: "proj_def".to_string(),
                     dir: "/home/u/Work".to_string(),
@@ -301,6 +304,7 @@ mod tests {
                     ppid: 1,
                     name: "bash".to_string(),
                     command: "/bin/bash".to_string(),
+                    exe_name: "bash".to_string(),
                     cwd: "/home/u/Work".to_string(),
                     state: ProcessState::Sleeping,
                     started_at_epoch: 1_700_000_000,

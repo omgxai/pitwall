@@ -35,6 +35,8 @@ fn print_help() {
     println!("                     [--note TEXT] [--session-id ID]");
     println!("    resume           Focus a live session or open its project terminal");
     println!("                     --session-id ID [--data-dir DIR]");
+    println!("    agents           List supported AI agents and detection status");
+    println!("    models           List models for an agent (--agent ID, default opencode)");
 }
 
 #[cfg(target_os = "linux")]
@@ -287,6 +289,68 @@ fn cmd_resume(args: &[String]) -> ExitCode {
     }
 }
 
+/// List supported agents with detection evidence (read-only PATH scan).
+fn cmd_agents() -> ExitCode {
+    use pitwall_lib::agents::{Availability, ModelDiscovery};
+    let found = pitwall_lib::agents::discover_in(&pitwall_lib::agents::path_dirs());
+    for a in found {
+        let status = match &a.path {
+            Some(p) => format!("found {}", p.display()),
+            None => "absent".to_string(),
+        };
+        let level = match a.availability {
+            Availability::High => "high",
+            Availability::Medium => "medium",
+        };
+        let models = match a.models {
+            ModelDiscovery::Command(sub) => format!("list: {sub}"),
+            ModelDiscovery::AgentDefault => "list: agent default".to_string(),
+        };
+        println!(
+            "{:8} {:6} {:7} {} ({})",
+            a.id, level, status, a.non_interactive, models
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+/// List models for one agent (executes only the verified list subcommand).
+fn cmd_models(args: &[String]) -> ExitCode {
+    let mut agent = "opencode".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--agent" => {
+                i += 1;
+                if let Some(a) = args.get(i) {
+                    agent = a.clone();
+                }
+            }
+            other => {
+                eprintln!("pitwall models: unknown option '{other}'.");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+    match pitwall_lib::agents::models_for(&agent, &pitwall_lib::agents::path_dirs()) {
+        Ok(models) if models.is_empty() => {
+            println!("{agent}: no models reported");
+            ExitCode::SUCCESS
+        }
+        Ok(models) => {
+            for m in models {
+                println!("{m}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("pitwall models: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -317,6 +381,8 @@ fn main() -> ExitCode {
         Some("snapshot") => cmd_snapshot(&args[1..]),
         Some("checkpoint") => cmd_checkpoint(&args[1..]),
         Some("resume") => cmd_resume(&args[1..]),
+        Some("agents") => cmd_agents(),
+        Some("models") => cmd_models(&args[1..]),
         Some(other) => {
             eprintln!("pitwall: unknown subcommand '{other}'. Run `pitwall --help`.");
             ExitCode::from(2)

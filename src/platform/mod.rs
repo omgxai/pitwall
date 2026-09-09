@@ -13,12 +13,16 @@ pub mod linux;
 /// `started_at_epoch` is seconds since the Unix epoch, or `-1` when the
 /// platform could not determine it. `command` is truncated by the platform
 /// (256 chars) to bound snapshot size and limit sensitive-data exposure.
+/// `exe_name` is the basename of the executable (never the full path, which
+/// may contain versions, usernames, or layout details); it disambiguates
+/// cases where argv[0] is a shim or wrapper (e.g. mise shims).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawProcess {
     pub pid: u32,
     pub ppid: u32,
     pub name: String,
     pub command: String,
+    pub exe_name: String,
     pub cwd: String,
     /// Raw single-letter state from the OS (`R`, `S`, `D`, `T`, `Z`, …).
     /// Interpretation happens in the core, not the platform.

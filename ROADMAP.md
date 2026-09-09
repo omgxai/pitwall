@@ -18,8 +18,10 @@ until M(n) is stable and committed.
   `checkpoints` table (manual + disappearance triggers, bounded retention),
   `pitwall checkpoint` / `pitwall resume` (focus-or-terminal, never agents),
   state.json v2 `resumable`, panel RESUME section. Safety Levels 1–2 only.
-- [ ] **M5 — OpenRouter BYO integration**: optional cached one-line summaries
-  with deterministic fallback; key via env/keyring, never logged.
+- [ ] **M5 — Native AI summaries + panel UX**: agent-delegated summaries
+  (existing user agents, no provider keys), evidence/role improvements,
+  derived activity, pixel-flag identity, scrollable panel. NO OpenRouter,
+  no cloud, no autonomous behavior. In progress (M5a done).
 - [ ] **M6 — Packaging + first public release**: `install.sh`, docs pass,
   clean-room install verified, v0.1.0 tag.
 

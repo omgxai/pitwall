@@ -132,6 +132,9 @@ pub struct ProcessInfo {
     pub ppid: u32,
     pub name: String,
     pub command: String,
+    /// Basename of the executable (never a full path). Independent signal
+    /// from argv: shims and wrappers lie in argv[0] but not in exe.
+    pub exe_name: String,
     pub cwd: String,
     pub state: ProcessState,
     /// Seconds since Unix epoch; `-1` when the platform could not tell.
@@ -149,6 +152,59 @@ pub struct ProjectInfo {
     pub is_git_repo: bool,
     pub branch: Option<String>,
     pub git_clean: Option<bool>,
+}
+
+/// What kind of window hosts a session. Terminal emulators (verified
+/// Omarchy classes) are detection contexts for agents; anything else with
+/// a process tree (browsers, GUI apps) is an `App` — agent inference is
+/// skipped there rather than reporting a misleading `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRole {
+    Terminal,
+    App,
+    Unknown,
+}
+
+impl WindowRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WindowRole::Terminal => "terminal",
+            WindowRole::App => "app",
+            WindowRole::Unknown => "unknown",
+        }
+    }
+}
+
+/// Classify a window from its app-id/class. Only verified terminal classes
+/// count as terminals (Omarchy default-terminal set + agent convention);
+/// empty classes are Unknown; everything else is an App window that merely
+/// happens to own processes.
+pub fn role_for_class(class: &str, initial_class: &str) -> WindowRole {
+    const TERMINALS: &[&str] = &[
+        "foot",
+        "kitty",
+        "alacritty",
+        "ghostty",
+        "wezterm",
+        "xterm",
+        "org.omarchy.agent",
+    ];
+    let mut saw_any = false;
+    for candidate in [class, initial_class] {
+        let c = candidate.trim().to_lowercase();
+        if c.is_empty() {
+            continue;
+        }
+        saw_any = true;
+        if TERMINALS.contains(&c.as_str()) {
+            return WindowRole::Terminal;
+        }
+    }
+    if saw_any {
+        WindowRole::App
+    } else {
+        WindowRole::Unknown
+    }
 }
 
 /// Aggregate liveness of a session tree.
@@ -178,6 +234,9 @@ pub struct TerminalSession {
     pub id: String,
     pub window: Option<WindowInfo>,
     pub root_pid: u32,
+    /// Window role (terminal/app/unknown). Agent inference only runs for
+    /// terminal (and unknown-role) windows; App windows skip it.
+    pub role: WindowRole,
     pub project: Option<ProjectInfo>,
     pub agent: AgentIdentity,
     pub state: SessionState,
@@ -212,12 +271,21 @@ fn command_basename(command: &str) -> String {
 ///
 /// Evidence counted (each adds one evidence string):
 /// - a descendant command basename containing a known agent token;
+/// - a descendant **exe basename** containing a token (independent of
+///   argv: shims/wrappers lie in argv[0], not in exe);
 /// - window class `org.omarchy.agent` (Omarchy agent-terminal convention);
 /// - window title prefix (`OC |`, `CC |`, …) matching the agent family.
 ///
 /// `High` needs ≥2 corroborating signals; a lone title hint is `Low`;
-/// a lone command match is `Medium`; nothing at all is `Unknown`.
-fn classify_agent(processes: &[ProcessInfo], window: Option<&WindowInfo>) -> AgentIdentity {
+/// a lone command/exe match is `Medium`; nothing at all is honest
+/// Unknown — `Low` with reason `terminal context only` for terminal
+/// windows (we looked, found nothing), plain `Unknown` for App windows
+/// (agent inference does not apply there at all).
+fn classify_agent(
+    processes: &[ProcessInfo],
+    window: Option<&WindowInfo>,
+    role: WindowRole,
+) -> AgentIdentity {
     // (command token, kind, title prefix)
     const KNOWN: &[(&str, AgentKind, &str)] = &[
         ("opencode", AgentKind::Opencode, "OC |"),
@@ -236,12 +304,21 @@ fn classify_agent(processes: &[ProcessInfo], window: Option<&WindowInfo>) -> Age
         } else {
             base
         };
+        let exe = p.exe_name.to_lowercase();
         for (idx, (token, _, _)) in KNOWN.iter().enumerate() {
             if base_or_name.contains(token) {
                 cmd_hits
                     .entry(idx)
                     .or_default()
                     .push(format!("cmd:{} (pid {})", base_or_name, p.pid));
+            }
+            // Exe evidence is independent: a wrapper in argv does not
+            // change what binary actually runs.
+            if !exe.is_empty() && exe.contains(token) && !base_or_name.contains(token) {
+                cmd_hits
+                    .entry(idx)
+                    .or_default()
+                    .push(format!("exe:{} (pid {})", exe, p.pid));
             }
         }
     }
@@ -264,10 +341,19 @@ fn classify_agent(processes: &[ProcessInfo], window: Option<&WindowInfo>) -> Age
     }
 
     let Some(idx) = best else {
+        // Honest Unknown: App windows were never in the agent domain;
+        // terminal windows were examined and yielded nothing.
+        if role == WindowRole::App {
+            return AgentIdentity {
+                kind: AgentKind::Unknown,
+                confidence: Confidence::Unknown,
+                evidence: Vec::new(),
+            };
+        }
         return AgentIdentity {
             kind: AgentKind::Unknown,
-            confidence: Confidence::Unknown,
-            evidence: Vec::new(),
+            confidence: Confidence::Low,
+            evidence: vec!["terminal context only".to_string()],
         };
     };
 
@@ -423,6 +509,7 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
                 ppid: r.ppid,
                 name: r.name.clone(),
                 command: r.command.clone(),
+                exe_name: r.exe_name.clone(),
                 cwd: r.cwd.clone(),
                 state: ProcessState::from_code(r.state_code),
                 started_at_epoch: to_epoch(r.starttime_ticks),
@@ -446,7 +533,8 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
             }
         });
 
-        let agent = classify_agent(&processes, Some(&window));
+        let role = role_for_class(&window.class, &window.initial_class);
+        let agent = classify_agent(&processes, Some(&window), role);
         let state = derive_session_state(&processes);
         let last_activity_epoch = processes
             .iter()
@@ -467,6 +555,7 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
             id,
             window: Some(window),
             root_pid: tree.first().copied().unwrap_or(0),
+            role,
             project,
             agent,
             state,
@@ -542,6 +631,30 @@ mod tests {
             ppid,
             name: name.to_string(),
             command: cmd.to_string(),
+            exe_name: String::new(),
+            cwd: cwd.to_string(),
+            state_code: state,
+            starttime_ticks: ticks,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn raw_exe(
+        pid: u32,
+        ppid: u32,
+        name: &str,
+        cmd: &str,
+        exe: &str,
+        cwd: &str,
+        state: char,
+        ticks: i64,
+    ) -> RawProcess {
+        RawProcess {
+            pid,
+            ppid,
+            name: name.to_string(),
+            command: cmd.to_string(),
+            exe_name: exe.to_string(),
             cwd: cwd.to_string(),
             state_code: state,
             starttime_ticks: ticks,
@@ -646,11 +759,117 @@ mod tests {
         };
         let snap = collect(&plat);
         let s = &snap.sessions[0];
+        // Honest Unknown: terminal examined, nothing found.
+        assert_eq!(s.role, WindowRole::Terminal);
         assert_eq!(s.agent.kind, AgentKind::Unknown);
-        assert_eq!(s.agent.confidence, Confidence::Unknown);
+        assert_eq!(s.agent.confidence, Confidence::Low);
+        assert_eq!(s.agent.evidence, vec!["terminal context only".to_string()]);
         assert!(s.project.is_none(), "root cwd must not become a project");
         assert_eq!(s.state, SessionState::Sleeping);
-        assert_eq!(s.last_activity_epoch, 1_700_000_000); // boot + 10/100
+        assert_eq!(s.last_activity_epoch, 1_700_000_000);
+    }
+
+    #[test]
+    fn app_window_skips_agent_inference() {
+        let plat = MockPlatform {
+            processes: vec![raw_exe(
+                600,
+                1,
+                "chromium",
+                "/usr/lib/chromium/chromium",
+                "chromium",
+                "/",
+                'S',
+                10,
+            )],
+            windows: vec![window("0x9", "chromium", "Some Page", 600)],
+            repos: HashMap::new(),
+        };
+        let snap = collect(&plat);
+        let s = &snap.sessions[0];
+        assert_eq!(s.role, WindowRole::App);
+        assert_eq!(s.agent.kind, AgentKind::Unknown);
+        assert_eq!(s.agent.confidence, Confidence::Unknown);
+        assert!(s.agent.evidence.is_empty());
+    }
+
+    #[test]
+    fn role_classification_covers_known_terminals() {
+        assert_eq!(role_for_class("foot", "foot"), WindowRole::Terminal);
+        assert_eq!(
+            role_for_class("org.omarchy.agent", "foot"),
+            WindowRole::Terminal
+        );
+        assert_eq!(role_for_class("kitty", ""), WindowRole::Terminal);
+        assert_eq!(role_for_class("Alacritty", ""), WindowRole::Terminal);
+        assert_eq!(role_for_class("chromium", ""), WindowRole::App);
+        assert_eq!(role_for_class("Code", "code"), WindowRole::App);
+        assert_eq!(role_for_class("", ""), WindowRole::Unknown);
+    }
+
+    #[test]
+    fn exe_basename_corroborates_agent_identity() {
+        // argv[0] is a wrapper/shim; exe tells the truth → Medium alone,
+        // High with the agent window class.
+        let plat = MockPlatform {
+            processes: vec![
+                raw(
+                    700,
+                    1,
+                    "foot",
+                    "/usr/bin/foot --app-id org.omarchy.agent",
+                    "/",
+                    'S',
+                    5,
+                ),
+                raw_exe(
+                    701,
+                    700,
+                    "node",
+                    "/usr/bin/node /opt/agent-shim/run.js",
+                    "opencode",
+                    "/home/u/Work",
+                    'R',
+                    6,
+                ),
+            ],
+            windows: vec![window("0x7", "org.omarchy.agent", "OC | shimmed", 700)],
+            repos: HashMap::new(),
+        };
+        let snap = collect(&plat);
+        let s = &snap.sessions[0];
+        assert_eq!(s.agent.kind, AgentKind::Opencode);
+        assert_eq!(s.agent.confidence, Confidence::High);
+        assert!(s
+            .agent
+            .evidence
+            .iter()
+            .any(|e| e.starts_with("exe:opencode")));
+    }
+
+    #[test]
+    fn exe_only_match_is_medium() {
+        let plat = MockPlatform {
+            processes: vec![
+                raw(800, 1, "foot", "/usr/bin/foot", "/", 'S', 5),
+                raw_exe(
+                    801,
+                    800,
+                    "runner",
+                    "/usr/bin/runner",
+                    "claude",
+                    "/home/u/Work",
+                    'S',
+                    6,
+                ),
+            ],
+            windows: vec![window("0x8", "foot", "plain shell", 800)],
+            repos: HashMap::new(),
+        };
+        let snap = collect(&plat);
+        let s = &snap.sessions[0];
+        assert_eq!(s.agent.kind, AgentKind::ClaudeCode);
+        assert_eq!(s.agent.confidence, Confidence::Medium);
     }
 
     #[test]
@@ -694,6 +913,7 @@ mod tests {
             ppid: 1,
             name: "x".to_string(),
             command: "x".to_string(),
+            exe_name: String::new(),
             cwd: "/home/u/Work".to_string(),
             state,
             started_at_epoch: 1,
