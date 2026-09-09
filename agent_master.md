@@ -68,6 +68,6 @@ Complete. Awaiting user direction.
 
 ## CURRENT STATE
 
-- Latest verified commit: evolving this run (docs governance; verify at push).
+- Latest verified commit: `124be9a` (== origin/main, tree clean).
 - Active child agents: NONE (inbox tasks queued, unstaffed).
 - Next action: user decides — M5g hardening kickoff or child staffing.
