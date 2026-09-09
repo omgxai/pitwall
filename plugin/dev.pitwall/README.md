@@ -32,6 +32,19 @@ all detection lives in the Rust daemon/CLI, never in QML.
 - Glyphs verified present in the installed font via `fc-query` charset:
   U+25CF/25CB (dots), U+F034E (focus). No other codepoints assumed.
 
+## Identity
+
+The panel header carries the Pitwall pixel checkered flag: original
+16x16 artwork (`assets/flag.svg`, MIT, same as repo — pole + 6x5
+2px checker cells in Omarchy default foreground/muted, transparent
+background, `crispEdges`). `assets/flag-64.png` is the raster export
+for README/GitHub/favicon use. The runtime copy at
+`plugin/dev.pitwall/flag.svg` is derived from `assets/` at install
+time (single source; do not edit the copy). Rendered at 14px with
+`smooth: false`; if the asset fails to load, the PITWALL wordmark
+alone carries the identity (no second mark, no emoji). Verified crisp
+at 16px via pixel dump (pure 2px cells, no blending).
+
 ## Design notes
 
 - No gauge: evaluated process-count and freshness meters; both either

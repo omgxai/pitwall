@@ -1,0 +1,46 @@
+<!-- Pitwall pixel checkered flag — ORIGINAL artwork (MIT, same as repo).
+     16x16 grid, 2px checker cells, crispEdges (no anti-aliasing).
+     Light cells #CACCCC and dark cells #707880 mirror the Omarchy
+     default foreground/muted roles; restrained by design, never the
+     brightest object in the panel. Transparent background: the shell
+     theme shows through. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" shape-rendering="crispEdges">
+  <!-- pole -->
+  <rect x="1" y="0" width="2" height="16" fill="#707880"/>
+  <!-- flag field: 6 cols x 5 rows of 2px cells, top-left light -->
+  <!-- row 0 (y=2) -->
+  <rect x="4" y="2" width="2" height="2" fill="#CACCCC"/>
+  <rect x="6" y="2" width="2" height="2" fill="#707880"/>
+  <rect x="8" y="2" width="2" height="2" fill="#CACCCC"/>
+  <rect x="10" y="2" width="2" height="2" fill="#707880"/>
+  <rect x="12" y="2" width="2" height="2" fill="#CACCCC"/>
+  <rect x="14" y="2" width="2" height="2" fill="#707880"/>
+  <!-- row 1 (y=4) -->
+  <rect x="4" y="4" width="2" height="2" fill="#707880"/>
+  <rect x="6" y="4" width="2" height="2" fill="#CACCCC"/>
+  <rect x="8" y="4" width="2" height="2" fill="#707880"/>
+  <rect x="10" y="4" width="2" height="2" fill="#CACCCC"/>
+  <rect x="12" y="4" width="2" height="2" fill="#707880"/>
+  <rect x="14" y="4" width="2" height="2" fill="#CACCCC"/>
+  <!-- row 2 (y=6) -->
+  <rect x="4" y="6" width="2" height="2" fill="#CACCCC"/>
+  <rect x="6" y="6" width="2" height="2" fill="#707880"/>
+  <rect x="8" y="6" width="2" height="2" fill="#CACCCC"/>
+  <rect x="10" y="6" width="2" height="2" fill="#707880"/>
+  <rect x="12" y="6" width="2" height="2" fill="#CACCCC"/>
+  <rect x="14" y="6" width="2" height="2" fill="#707880"/>
+  <!-- row 3 (y=8) -->
+  <rect x="4" y="8" width="2" height="2" fill="#707880"/>
+  <rect x="6" y="8" width="2" height="2" fill="#CACCCC"/>
+  <rect x="8" y="8" width="2" height="2" fill="#707880"/>
+  <rect x="10" y="8" width="2" height="2" fill="#CACCCC"/>
+  <rect x="12" y="8" width="2" height="2" fill="#707880"/>
+  <rect x="14" y="8" width="2" height="2" fill="#CACCCC"/>
+  <!-- row 4 (y=10) -->
+  <rect x="4" y="10" width="2" height="2" fill="#CACCCC"/>
+  <rect x="6" y="10" width="2" height="2" fill="#707880"/>
+  <rect x="8" y="10" width="2" height="2" fill="#CACCCC"/>
+  <rect x="10" y="10" width="2" height="2" fill="#707880"/>
+  <rect x="12" y="10" width="2" height="2" fill="#CACCCC"/>
+  <rect x="14" y="10" width="2" height="2" fill="#707880"/>
+</svg>

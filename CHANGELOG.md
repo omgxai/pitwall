@@ -7,6 +7,9 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M5e pixel flag identity: original 16x16 checkered `assets/flag.svg`
+  (+ 64px PNG), 14px panel header mark with wordmark fallback,
+  screenshot-verified, no layout/semantics changes.
 - M5d Part 1 summary persistence + state v3: `summaries` cache table
   (input_hash PK; additive v3 migration preserving v2 rows), hash-gated
   cache-first `summarize`, state.json v3 `summary{}` (ready/error/null),

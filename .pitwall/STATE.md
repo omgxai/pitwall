@@ -12,7 +12,8 @@
 - **M4 — Checkpoints + Resume**: COMPLETE, pushed (`c76dea5`).
 - **M5a — Evidence/roles + agent discovery**: COMPLETE, pushed (`3f04f45`).
 - **M5c — Ephemeral AI workspace context**: COMPLETE, pushed (`99c6fae`).
-- **M5d Part 1 — Summary persistence + state v3**: COMPLETE (pending commit/push below).
+- **M5d Part 1 — Summary persistence + state v3**: COMPLETE, pushed (`41aaa03`).
+- **M5e — Pixel flag identity**: COMPLETE (pending commit/push below).
 
 ## Completed work
 
@@ -317,9 +318,30 @@
   screenshots inspected; schema verified (5 tables, no text columns).
 - Secret scan — clean (results at commit time).
 
+## Completed work (M5e)
+
+- [x] Original 16x16 pixel checkered flag (`assets/flag.svg` + 64px
+  PNG export; Omarchy default fg/muted; transparent bg; crispEdges).
+  Pixel-verified at 16px (pure 2px cells, no blending).
+- [x] Panel header mark: 14px unsmoothed Image + PITWALL caption;
+  wordmark-only fallback (quadrant glyphs absent from font).
+  Runtime copy derived from `assets/` at install; documented.
+- [x] Screenshot-verified on live desktop: recognizable checker,
+  native proportions, no layout regression, zero shell warnings.
+
+## Remaining work (next)
+
+- M5f (scrollable panel + summary/gear UI) per approved plan.
+  Awaiting instruction. Do NOT start unapproved scope.
+
+## Tests performed (M5e, 2026-09-10)
+
+- `cargo fmt --check` clean; 96 tests passed; clippy clean.
+- Asset pixel dump + live screenshots inspected; secret scan clean.
+
 ## Exact next step
 
-- Commit + push M5d Part 1, then STOP (no M5e/M5f without instruction).
+- Commit + push M5e, then STOP (no M5f without instruction).
 
 ## Completed work (M0 archive)
 

@@ -213,6 +213,38 @@ Panel {
         width: parent.width
         spacing: Style.space(10)
 
+        // Pitwall identity mark: original pixel checkered flag (assets/)
+        // plus caption wordmark. Fixed 14px, no smoothing (pixel geometry
+        // must stay crisp). If the asset ever fails to load, the wordmark
+        // alone carries the identity — no second mark, no emoji.
+        Row {
+          width: parent.width
+          spacing: Style.space(6)
+
+          Image {
+            width: Style.space(14)
+            height: Style.space(14)
+            anchors.verticalCenter: parent.verticalCenter
+            source: "flag.svg"
+            fillMode: Image.PreserveAspectFit
+            smooth: false
+            mipmap: false
+            visible: status !== Image.Error
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+            text: "PITWALL"
+            color: Qt.darker(Color.foreground, 1.4)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1
+            renderType: Text.NativeRendering
+          }
+        }
+
         SessionHero {
           width: parent.width
           session: root.primary
