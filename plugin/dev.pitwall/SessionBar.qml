@@ -25,6 +25,9 @@ Column {
   property bool hovered: false
   // Attached card (parent-owned content + actions).
   property bool showCard: false
+  // Unread inbox rows for this entry (parent-filtered). Empty = none.
+  property var notifs: []
+  readonly property bool hasUnread: notifs.length > 0
   property string detailText: ""
   property bool canFocus: false
   property bool canStop: false
@@ -42,6 +45,7 @@ Column {
 
   signal clicked()
   signal hovered(bool isHovered)
+  signal notifClicked(int notifId)
 
   // Assignment execution: fixed argv, validated session id, capped
   // prompt. No shell, no interpolation. Result is display text only.
@@ -155,10 +159,23 @@ Column {
     width: parent.width
     height: Style.space(14) + Style.space(22)
 
+    Rectangle {
+      id: unreadDot
+      visible: root.hasUnread
+      width: Style.space(6)
+      height: Style.space(6)
+      radius: width / 2
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.topMargin: Style.space(4)
+      color: Color.accent
+    }
+
     Text {
       id: barLabel
       textFormat: Text.PlainText
-      anchors.left: parent.left
+      anchors.left: unreadDot.visible ? unreadDot.right : parent.left
+      anchors.leftMargin: unreadDot.visible ? Style.space(4) : 0
       anchors.right: parent.right
       anchors.top: parent.top
       elide: Text.ElideRight
@@ -285,6 +302,60 @@ Column {
         color: Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
+        renderType: Text.NativeRendering
+      }
+
+      // Inbox rows for this entry only. Click marks exactly that row
+      // read (parent runs the fixed CLI + refreshes). Listing never
+      // marks; expanding never marks.
+      Repeater {
+        model: Math.min(root.notifs.length, 3)
+        delegate: Item {
+          width: cardColumn.width
+          height: notifText.implicitHeight + Style.space(2)
+
+          Text {
+            id: notifText
+            textFormat: Text.PlainText
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            elide: Text.ElideRight
+            maximumLineCount: 2
+            wrapMode: Text.Wrap
+            text: {
+              var nb = root.notifs[index] || {}
+              var mark = String(nb.severity) === "attention" ? "! "
+                : String(nb.severity) === "completion" ? "\u2713 " : "\u2022 "
+              return mark + String(nb.detail || "")
+            }
+            color: {
+              var sev = String((root.notifs[index] || {}).severity || "")
+              if (sev === "attention") return Color.urgent
+              return Qt.darker(Color.foreground, 1.15)
+            }
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            renderType: Text.NativeRendering
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.notifClicked(Number((root.notifs[index] || {}).id || 0))
+          }
+        }
+      }
+
+      Text {
+        visible: root.notifs.length > 3
+        width: parent.width
+        textFormat: Text.PlainText
+        text: "+" + (root.notifs.length - 3) + " more"
+        color: Qt.darker(Color.foreground, 1.4)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
         renderType: Text.NativeRendering
       }
 

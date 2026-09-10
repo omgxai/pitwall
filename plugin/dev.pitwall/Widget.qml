@@ -345,6 +345,23 @@ Panel {
         }
       }
     }
+
+    // Unread badge: attention + completion only (stateReader.unreadCount).
+    // No badge at zero. Text-only overlay, theme tint, no animation.
+    Text {
+      visible: stateReader.unreadCount > 0
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.rightMargin: -Style.space(2)
+      anchors.topMargin: -Style.space(4)
+      textFormat: Text.PlainText
+      text: stateReader.unreadCount > 9 ? "9+" : String(stateReader.unreadCount)
+      color: Color.accent
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      font.bold: true
+      renderType: Text.NativeRendering
+    }
   }
 
   KeyboardPanel {
@@ -355,7 +372,8 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(560))
+    contentHeight: panel.fittedContentHeight(
+      headerItem.height + railColumn.implicitHeight + Style.space(8), Style.space(560))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -374,11 +392,103 @@ Panel {
         else if (root.primary) root.focusSession(root.primary)
       }
 
-      Flickable {
-        id: railFlick
+      Column {
+        id: panelColumn
         anchors.fill: parent
+        spacing: Style.space(8)
+
+        // ---- fixed header (outside the scroll: stable hitboxes) ----
+        Item {
+          id: headerItem
+          width: parent.width
+          height: headerRow.implicitHeight
+
+          Row {
+            id: headerRow
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(6)
+
+            Image {
+              id: flagMark
+              width: Style.space(14)
+              height: Style.space(14)
+              anchors.verticalCenter: parent.verticalCenter
+              source: "flag.svg"
+              fillMode: Image.PreserveAspectFit
+              smooth: false
+              mipmap: false
+              visible: status !== Image.Error
+            }
+
+            // Single wordmark (split-color, palette-bound).
+            Row {
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 0
+
+              Text {
+                textFormat: Text.PlainText
+                text: "PIT"
+                color: Color.foreground
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+                renderType: Text.NativeRendering
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                text: "WALL"
+                color: Color.accent
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+                renderType: Text.NativeRendering
+              }
+            }
+          }
+
+          PanelActionButton {
+            id: refreshButton
+            anchors.right: gearButton.left
+            anchors.rightMargin: Style.space(2)
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: String.fromCodePoint(0xF0450)
+            tooltipText: "Refresh workspace state (no AI)"
+            focusable: true
+            onClicked: root.refreshNow()
+
+            NumberAnimation on rotation { // reset by onExited (see refreshProc)
+              running: root.refreshing
+              loops: Animation.Infinite
+              from: 0
+              to: 360
+              duration: 900
+              easing.type: Easing.OutCubic
+            }
+          }
+
+          PanelActionButton {
+            id: gearButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: String.fromCodePoint(0xF013)
+            tooltipText: "Pitwall settings"
+            focusable: true
+            onClicked: {
+              root.showSettings = !root.showSettings
+              if (root.showSettings) root.refreshModels(root.cfgAgent)
+            }
+          }
+        }
+
+        Flickable {
+        id: railFlick
+        width: parent.width
+        height: Math.min(railColumn.implicitHeight,
+          Math.max(200, panel.contentHeight - headerItem.height - panelColumn.spacing))
         contentWidth: width
-        contentHeight: column.implicitHeight
+        contentHeight: railColumn.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
@@ -393,92 +503,10 @@ Panel {
         }
 
         Column {
-          id: column
+          id: railColumn
           width: railFlick.width
           spacing: Style.space(10)
 
-          // ---- fixed header: identity left, gear right ----
-          Item {
-            width: parent.width
-            height: Math.max(flagMark.height, gearButton.height)
-
-            Row {
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(6)
-
-              Image {
-                id: flagMark
-                width: Style.space(14)
-                height: Style.space(14)
-                anchors.verticalCenter: parent.verticalCenter
-                source: "flag.svg"
-                fillMode: Image.PreserveAspectFit
-                smooth: false
-                mipmap: false
-                visible: status !== Image.Error
-              }
-
-              // Single wordmark (split-color, palette-bound).
-              Row {
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: 0
-
-                Text {
-                  textFormat: Text.PlainText
-                  text: "PIT"
-                  color: Color.foreground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                  renderType: Text.NativeRendering
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  text: "WALL"
-                  color: Color.accent
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                  renderType: Text.NativeRendering
-                }
-              }
-            }
-
-            PanelActionButton {
-              id: refreshButton
-              anchors.right: gearButton.left
-              anchors.rightMargin: Style.space(2)
-              anchors.verticalCenter: parent.verticalCenter
-              iconText: String.fromCodePoint(0xF0450)
-              tooltipText: "Refresh workspace state (no AI)"
-              focusable: true
-              onClicked: root.refreshNow()
-
-              NumberAnimation on rotation { // reset by onExited (see refreshProc)
-                running: root.refreshing
-                loops: Animation.Infinite
-                from: 0
-                to: 360
-                duration: 900
-                easing.type: Easing.OutCubic
-              }
-            }
-
-            PanelActionButton {
-              id: gearButton
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              iconText: String.fromCodePoint(0xF013)
-              tooltipText: "Pitwall settings"
-              focusable: true
-              onClicked: {
-                root.showSettings = !root.showSettings
-                if (root.showSettings) root.refreshModels(root.cfgAgent)
-              }
-            }
-          }
 
           // ---- settings view (replaces rail while open) ----
           Column {
@@ -660,57 +688,56 @@ Panel {
             // alone under their own session id. Identity untouched:
             // grouping is presentation over stable sess_*/proj_* ids.
             // Collapse state is per group key; geometry stays in-flow.
+            // Single-row group header: [tier icon] name · count [unread] [chevron].
+            // The icon carries the tier; no separate caption row exists.
             Repeater {
               model: root.railGroups
               delegate: Column {
-                width: column.width
+                width: railColumn.width
                 spacing: Style.space(4)
-                visible: modelData.visible
-
-                Row {
-                  visible: modelData.kind === "tier"
-                  width: parent.width
-                  spacing: Style.space(6)
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: root.tierIcon(modelData.label)
-                    color: Qt.darker(Color.foreground, 1.4)
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    renderType: Text.NativeRendering
-                  }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: modelData.label
-                    color: Qt.darker(Color.foreground, 1.6)
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    renderType: Text.NativeRendering
-                  }
-                }
 
                 Item {
-                  visible: modelData.kind === "group"
                   width: parent.width
                   height: Style.font.bodySmall + Style.space(4)
 
-                  Text {
-                    textFormat: Text.PlainText
+                  Row {
                     anchors.left: parent.left
                     anchors.right: toggleGlyph.left
                     anchors.rightMargin: Style.space(4)
                     anchors.verticalCenter: parent.verticalCenter
-                    elide: Text.ElideRight
-                    text: modelData.label
-                    color: Color.foreground
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.bodySmall
-                    renderType: Text.NativeRendering
+                    spacing: Style.space(6)
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: root.tierIcon(modelData.tier)
+                      color: Qt.darker(Color.foreground, 1.4)
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      renderType: Text.NativeRendering
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.verticalCenter: parent.verticalCenter
+                      elide: Text.ElideRight
+                      text: modelData.label
+                      color: Color.foreground
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                      renderType: Text.NativeRendering
+                    }
+
+                    Text {
+                      visible: modelData.unread > 0
+                      textFormat: Text.PlainText
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "\u25cf" + modelData.unread
+                      color: Color.accent
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      renderType: Text.NativeRendering
+                    }
                   }
 
                   Text {
@@ -736,7 +763,7 @@ Panel {
                 Repeater {
                   model: (modelData.kind === "group" && !modelData.collapsed) ? modelData.entries : []
                   delegate: SessionBar {
-                    width: column.width
+                    width: railColumn.width
                     entry: modelData.ref
                     resumable: modelData.hist
                     frac: modelData.hist ? 0.25 : root.barFrac(modelData.ref.age_secs)
@@ -744,6 +771,8 @@ Panel {
                     dimmed: root.selectedId !== "" && root.selectedId !== modelData.selId
                     showCard: root.selectedId === modelData.selId
                     detailText: modelData.hist ? root.detailFor(modelData.ref, true) : root.detailFor(modelData.ref, false)
+                    notifs: root.notifsFor(modelData.selId)
+                    onNotifClicked: function(nid) { root.markNotifRead(nid) }
                     canFocus: !modelData.hist
                     canStop: !modelData.hist
                     canClose: !modelData.hist
@@ -767,6 +796,7 @@ Panel {
           }
         }
       }
+      }
     }
   }
 
@@ -778,13 +808,6 @@ Panel {
   // Groups start collapsed (expandedGroups empty); headers toggle.
   // Collapsed default keeps the rail a project map, not a process list.
   readonly property var tierOrder: ["pitwall-native", "agents", "workspace", "system"]
-  readonly property var tierLabels: ({
-    "pitwall-native": "PITWALL-NATIVE",
-    "agents": "AGENTS",
-    "workspace": "WORKSPACE",
-    "system": "SYSTEM"
-  })
-
   property var expandedGroups: ({})
   function toggleGroup(key) {
     var next = {}
@@ -795,10 +818,12 @@ Panel {
 
   // Tier icons: verified Nerd codepoints only (coverage table in the
   // plugin README). Glyph never carries meaning alone — tier word follows.
-  function tierIcon(label) {
-    if (label === "PITWALL-NATIVE") return String.fromCodePoint(0xF024)
-    if (label === "AGENTS") return String.fromCodePoint(0xF007)
-    if (label === "WORKSPACE") return String.fromCodePoint(0xF07B)
+  // Tier icon by tier key (verified Nerd codepoints; word removed —
+  // the project label beside it carries the name).
+  function tierIcon(tier) {
+    if (tier === "pitwall-native") return String.fromCodePoint(0xF024)
+    if (tier === "agents") return String.fromCodePoint(0xF007)
+    if (tier === "workspace") return String.fromCodePoint(0xF07B)
     return String.fromCodePoint(0xF0AD)
   }
 
@@ -835,10 +860,26 @@ Panel {
       }
       groups[gkey].hist.push(c)
     }
+    // Unread inbox indexed once per rebuild (small arrays by contract).
+    var notifs = stateReader.notifications
+    function groupUnread(gkey, entries) {
+      var n = 0
+      for (var ni = 0; ni < notifs.length; ni++) {
+        var nb = notifs[ni] || {}
+        var sid = String(nb.session_id || "")
+        var matched = false
+        for (var ei = 0; ei < entries.length && !matched; ei++) {
+          var er = entries[ei].ref || {}
+          if (String(er.id || "") !== "" && String(er.id) === sid) matched = true
+          else if (String(er.session_id || "") !== "" && String(er.session_id) === sid) matched = true
+        }
+        if (matched || (String(nb.project_id || "") !== "" && String(nb.project_id) === gkey)) n++
+      }
+      return n
+    }
     var t, k, g, entries, collapsed
     for (var ti = 0; ti < tierOrder.length; ti++) {
       t = tierOrder[ti]
-      var tierGroups = []
       for (var oi = 0; oi < order.length; oi++) {
         k = order[oi]
         g = groups[k]
@@ -852,11 +893,41 @@ Panel {
         }
         if (entries.length === 0) continue
         collapsed = !expandedGroups[g.key]
-        tierGroups.push({ kind: "group", key: g.key, label: groupDisplayName(entries), collapsed: collapsed, entries: collapsed ? [] : entries })
+        out.push({ kind: "group", key: g.key, tier: t, label: groupDisplayName(entries),
+          collapsed: collapsed, entries: collapsed ? [] : entries,
+          unread: groupUnread(g.key, entries) })
       }
-      if (tierGroups.length === 0) continue
-      out.push({ kind: "tier", label: tierLabels[t] || t, visible: true })
-      for (var gi = 0; gi < tierGroups.length; gi++) out.push(tierGroups[gi])
+    }
+    return out
+  }
+
+  function entryHasUnread(selId) {
+    var notifs = stateReader.notifications
+    var sid = (selId.charAt(0) === "r") ? selId.slice(2) : selId
+    for (var i = 0; i < notifs.length; i++) {
+      if (String((notifs[i] || {}).session_id || "") === sid) return true
+    }
+    return false
+  }
+
+  // Notifications scoped to one entry id (live or r:-prefixed).
+  // Number([]) guards the id path: read() refuses id <= 0.
+  function markNotifRead(id) {
+    var nid = Number(id) || 0
+    if (nid <= 0) return
+    runFixed(["pitwall", "notifications", "read", String(nid)], function(code) {
+      if (code !== 0) console.warn("pitwall", "notification read exited", code)
+      stateReader.refresh()
+    })
+  }
+
+  function notifsFor(selId) {
+    var notifs = stateReader.notifications
+    var sid = (selId.charAt(0) === "r") ? selId.slice(2) : selId
+    var out = []
+    for (var i = 0; i < notifs.length; i++) {
+      var nb = notifs[i] || {}
+      if (String(nb.session_id || "") === sid) out.push(nb)
     }
     return out
   }

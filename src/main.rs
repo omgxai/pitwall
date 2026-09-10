@@ -39,6 +39,7 @@ fn print_help() {
     println!("    models           List models for an agent (--agent ID, default opencode)");
     println!("    summarize        Ask the configured agent for a workspace summary");
     println!("    config             Get/set user configuration (get [key] | set <key> <value>)");
+    println!("    notifications      List inbox ([--unread]) or mark read (read <id>)");
     println!("    assign           Assign a task to a live session (--session-id ID --role ROLE --prompt TEXT [--model P/M] [--timeout SECS])");
     println!("                     [--agent ID] [--model P/M] [--dir DIR]");
     println!("                     [--timeout SECS] [--dry-run] [--clear] [--data-dir DIR]");
@@ -163,6 +164,18 @@ fn cmd_config(args: &[String]) -> ExitCode {
     }
 }
 
+/// Notification inbox view for state.json: unread rows (cap 20) plus the
+/// badge count (attention + completion). Degradable: store failure yields
+/// an empty inbox, never a failed snapshot.
+fn notification_view(db: &std::path::Path) -> (Vec<store::Notification>, i64) {
+    let Ok(store) = store::Store::open(db) else {
+        return (Vec::new(), 0);
+    };
+    let list = store.unread_notifications(20).unwrap_or_default();
+    let badge = store.unread_badge_count().unwrap_or(0);
+    (list, badge)
+}
+
 fn cmd_snapshot(args: &[String]) -> ExitCode {
     let mut db_path: Option<PathBuf> = None;
     let mut state_path: Option<PathBuf> = None;
@@ -202,6 +215,14 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
     // 1. Persist (degradable).
     match store::Store::open(&db) {
         Ok(mut s) => {
+            // Previous observation for notification diffing (degradable:
+            // absent on first run; staleness harmless).
+            let prev_sessions: Vec<store::PrevSession> = s
+                .latest_observation()
+                .ok()
+                .flatten()
+                .and_then(|(id, _)| s.observation_sessions(id).ok())
+                .unwrap_or_default();
             if s.recovered_from_corrupt {
                 eprintln!(
                     "pitwall snapshot: warning: corrupt database was quarantined and recreated"
@@ -215,6 +236,15 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
                     // after reappearance). Degradable like persist.
                     let live_ids: Vec<String> =
                         snapshot.sessions.iter().map(|s| s.id.clone()).collect();
+                    match s.sync_snapshot_notifications(&prev_sessions, &snapshot, now_epoch()) {
+                        Ok(n) if n > 0 => {
+                            println!("snapshot: {n} notification(s)");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("pitwall snapshot: warning: notification sync failed ({e})");
+                        }
+                    }
                     match s.checkpoint_disappearances(&live_ids, observation_id, now_epoch()) {
                         Ok(ids) => {
                             for id in ids {
@@ -281,6 +311,7 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
     }
 
     // 2. Refresh the state.json artifact (degradable, preserves last good).
+    let (notif_list, notif_badge) = notification_view(&db);
     match store::atomic_write(
         &state_file,
         output::snapshot_to_state_json(
@@ -289,6 +320,8 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
             last_summary.as_ref(),
             &meta,
             &load_config_echo(),
+            &notif_list,
+            notif_badge,
         )
         .as_bytes(),
     ) {
@@ -570,8 +603,16 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
             .unwrap_or_default();
         let meta = session_meta_map(&store, &snapshot);
         let state_path = dir.join(store::STATE_FILENAME);
-        let payload =
-            output::snapshot_to_state_json(&snapshot, &resumable, None, &meta, &load_config_echo());
+        let (notif_list, notif_badge) = notification_view(&db);
+        let payload = output::snapshot_to_state_json(
+            &snapshot,
+            &resumable,
+            None,
+            &meta,
+            &load_config_echo(),
+            &notif_list,
+            notif_badge,
+        );
         match store::atomic_write(&state_path, payload.as_bytes()) {
             Ok(()) => eprintln!("pitwall summarize: state artifact {}", state_path.display()),
             Err(e) => eprintln!("pitwall summarize: warning: state artifact not written ({e})"),
@@ -638,12 +679,15 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
             Some(session_meta_map(&store, &snapshot))
         })()
         .unwrap_or_default();
+        let (notif_list, notif_badge) = notification_view(&data_path.join(store::DB_FILENAME));
         let payload = output::snapshot_to_state_json(
             &snapshot,
             resumable,
             summary,
             &meta,
             &load_config_echo(),
+            &notif_list,
+            notif_badge,
         );
         match store::atomic_write(&state_path, payload.as_bytes()) {
             Ok(()) => eprintln!("pitwall summarize: state artifact {}", state_path.display()),
@@ -867,21 +911,156 @@ fn cmd_assign(args: &[String]) -> ExitCode {
     };
     let dir = data_dir.unwrap_or_else(store::default_data_dir);
     let db = dir.join(store::DB_FILENAME);
+    // Assignment result notifications: completion on success, attention
+    // on failure. Best-effort (store failure never masks the result);
+    // detail carries outcome facts only, never prompt/reply bodies.
+    fn notify_assign_result(
+        db: &std::path::Path,
+        a: &pitwall_lib::assign::Assignment,
+        ok: bool,
+        detail: &str,
+    ) {
+        let Ok(mut store) = store::Store::open(db) else {
+            return;
+        };
+        let (kind, severity) = if ok {
+            (store::notif_kind::ASSIGN_DONE, store::severity::COMPLETION)
+        } else {
+            (store::notif_kind::ASSIGN_FAILED, store::severity::ATTENTION)
+        };
+        let _ = store.notify(
+            kind,
+            &a.session_id,
+            &a.project_id,
+            if a.project_name.is_empty() {
+                "session"
+            } else {
+                &a.project_name
+            },
+            None,
+            &a.agent_kind,
+            "unknown",
+            None,
+            severity,
+            detail,
+            now_epoch(),
+        );
+    }
     match pitwall_lib::assign::prepare(&platform(), &db, &sid, &role, &prompt, model.as_deref()) {
-        Ok(a) => match pitwall_lib::assign::execute(&a, std::time::Duration::from_secs(timeout_secs)) {
-            Ok(text) => {
-                println!("{text}");
-                ExitCode::SUCCESS
+        Ok(a) => {
+            match pitwall_lib::assign::execute(&a, std::time::Duration::from_secs(timeout_secs)) {
+                Ok(text) => {
+                    let detail = format!("{} done ({} chars)", a.role_label, text.chars().count());
+                    notify_assign_result(&db, &a, true, &detail);
+                    println!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    let short = if e.contains("timed out") {
+                        "timeout"
+                    } else if e.contains("spawn failed") || e.contains("not installed") {
+                        "agent unavailable"
+                    } else {
+                        "agent error"
+                    };
+                    notify_assign_result(
+                        &db,
+                        &a,
+                        false,
+                        &format!("{} failed: {short}", a.role_label),
+                    );
+                    eprintln!("pitwall assign: {e}");
+                    ExitCode::from(1)
+                }
             }
-            Err(e) => {
-                eprintln!("pitwall assign: {e}");
-                ExitCode::from(1)
-            }
-        },
+        }
         Err(e) => {
-            let code = if e.contains("malformed") || e.contains("usage") { 2 } else { 1 };
+            let code = if e.contains("malformed") || e.contains("usage") {
+                2
+            } else {
+                1
+            };
             eprintln!("pitwall assign: {e}");
             ExitCode::from(code)
+        }
+    }
+}
+
+/// Notification inbox CLI: list (newest first, `--unread` filters) and
+/// mark-read by id. Reading is explicit — listing never marks.
+fn cmd_notifications(args: &[String]) -> ExitCode {
+    let mut data_dir: Option<PathBuf> = None;
+    let mut unread_only = false;
+    let mut read_id: Option<i64> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--data-dir" => {
+                i += 1;
+                data_dir = args.get(i).map(PathBuf::from);
+            }
+            "--unread" => unread_only = true,
+            "read" => {
+                i += 1;
+                match args.get(i).and_then(|v| v.parse::<i64>().ok()) {
+                    Some(id) if id > 0 => read_id = Some(id),
+                    _ => {
+                        eprintln!("pitwall notifications: read needs a positive id");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            other => {
+                eprintln!("pitwall notifications: unknown option '{other}'.");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+    let dir = data_dir.unwrap_or_else(store::default_data_dir);
+    let db = dir.join(store::DB_FILENAME);
+    let store = match store::Store::open(&db) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("pitwall notifications: store unavailable ({e})");
+            return ExitCode::from(1);
+        }
+    };
+    if let Some(id) = read_id {
+        match store.mark_notification_read(id, now_epoch()) {
+            Ok(true) => {
+                println!("notification {id} marked read");
+                return ExitCode::SUCCESS;
+            }
+            Ok(false) => {
+                eprintln!("pitwall notifications: no unread notification {id}");
+                return ExitCode::from(1);
+            }
+            Err(e) => {
+                eprintln!("pitwall notifications: read failed ({e})");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let list = if unread_only {
+        store.unread_notifications(30)
+    } else {
+        store.recent_notifications(30)
+    };
+    match list {
+        Ok(rows) => {
+            for n in rows {
+                let read_mark = if n.read_at.is_some() { " " } else { "•" };
+                println!(
+                    "{read_mark} {} [{}|{}] {} — {}",
+                    n.id, n.kind, n.severity, n.project_name, n.detail
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("pitwall notifications: list failed ({e})");
+            ExitCode::from(1)
         }
     }
 }
@@ -920,6 +1099,7 @@ fn main() -> ExitCode {
         Some("models") => cmd_models(&args[1..]),
         Some("summarize") => cmd_summarize(&args[1..]),
         Some("config") => cmd_config(&args[1..]),
+        Some("notifications") => cmd_notifications(&args[1..]),
         Some("assign") => cmd_assign(&args[1..]),
         Some(other) => {
             eprintln!("pitwall: unknown subcommand '{other}'. Run `pitwall --help`.");

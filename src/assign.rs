@@ -35,6 +35,10 @@ pub struct Assignment {
     pub prompt: String,
     pub role_label: String,
     pub session_id: String,
+    /// Display facts from the live session (for notifications only).
+    pub project_id: String,
+    pub project_name: String,
+    pub agent_kind: String,
 }
 
 /// Validate and build an assignment. Order: shape → liveness → binary →
@@ -112,6 +116,19 @@ pub fn prepare(
     } else {
         "Worker".to_string()
     };
+    let (project_id, project_name, agent_kind) = live
+        .project
+        .as_ref()
+        .map(|p| {
+            (
+                p.id.clone(),
+                p.name.clone(),
+                live.agent.kind.as_str().to_string(),
+            )
+        })
+        .unwrap_or_default();
+    // `unwrap_or_default` on a 3-tuple of Strings yields empties; the
+    // fields below stay honest (empty = unknown, never invented).
     Ok(Assignment {
         binary,
         dir,
@@ -119,6 +136,9 @@ pub fn prepare(
         prompt: scrubbed,
         role_label,
         session_id: session_id.to_string(),
+        project_id,
+        project_name,
+        agent_kind,
     })
 }
 
@@ -218,15 +238,28 @@ mod tests {
 
     #[test]
     fn malformed_id_refuses_before_anything() {
-        let plat = LiveMock { windows: vec![], launched: RefCell::new(Vec::new()) };
-        let err = prepare(&plat, Path::new("/nonexistent.db"), "bogus", "UI Auditor", "do things", None)
-            .unwrap_err();
+        let plat = LiveMock {
+            windows: vec![],
+            launched: RefCell::new(Vec::new()),
+        };
+        let err = prepare(
+            &plat,
+            Path::new("/nonexistent.db"),
+            "bogus",
+            "UI Auditor",
+            "do things",
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("malformed"));
     }
 
     #[test]
     fn vanished_session_refuses_without_fallback() {
-        let plat = LiveMock { windows: vec![], launched: RefCell::new(Vec::new()) };
+        let plat = LiveMock {
+            windows: vec![],
+            launched: RefCell::new(Vec::new()),
+        };
         let err = prepare(
             &plat,
             Path::new("/nonexistent.db"),
@@ -258,9 +291,19 @@ mod tests {
         assert_eq!(snap.sessions.len(), 1);
         let sid = snap.sessions[0].id.clone();
         // No project -> dir refusal (before prompt validation).
-        let err = prepare(&plat, Path::new("/nonexistent.db"), &sid, "UI Auditor", "", None)
-            .unwrap_err();
-        assert!(err.contains("non-absolute") || err.contains("unavailable"), "{err}");
+        let err = prepare(
+            &plat,
+            Path::new("/nonexistent.db"),
+            &sid,
+            "UI Auditor",
+            "",
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("non-absolute") || err.contains("unavailable"),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -281,6 +324,9 @@ mod tests {
             prompt: "audit this; rm -rf /".to_string(),
             role_label: "UI Auditor".to_string(),
             session_id: "sess_0123456789abcdef".to_string(),
+            project_id: "proj_x".to_string(),
+            project_name: "proj".to_string(),
+            agent_kind: "opencode".to_string(),
         };
         let argv = build_argv(&a);
         assert_eq!(argv[0], "/usr/bin/opencode");
@@ -290,6 +336,8 @@ mod tests {
         assert!(argv.contains(&"/home/u/proj".to_string()));
         // Prompt is ONE trailing element (message position), never flags.
         assert_eq!(argv.last().unwrap(), "audit this; rm -rf /");
-        assert!(!argv.iter().any(|x| x.contains("sh -c") || x.contains("bash -c")));
+        assert!(!argv
+            .iter()
+            .any(|x| x.contains("sh -c") || x.contains("bash -c")));
     }
 }

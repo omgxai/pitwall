@@ -293,6 +293,8 @@ pub fn snapshot_to_state_json(
     summary: Option<&StateSummary>,
     meta: &HashMap<String, SessionMeta>,
     config: &ConfigEcho,
+    notifications: &[crate::store::Notification],
+    unread_count: i64,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -399,6 +401,25 @@ pub fn snapshot_to_state_json(
         }
         None => out.push_str("\"summary\":null"),
     }
+    out.push_str(",\"notifications\":[");
+    for (i, n) in notifications.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"id\":{},\"kind\":{},\"session_id\":{},\"project\":{},\"agent\":{},\"state\":{},\"severity\":{},\"detail\":{},\"created_at\":{}}}",
+            n.id,
+            q(&n.kind),
+            q(&n.session_id),
+            q(&n.project_name),
+            q(&n.agent_kind),
+            q(&n.state),
+            q(&n.severity),
+            q(&n.detail),
+            n.created_at
+        ));
+    }
+    out.push_str(&format!("],\"unread_count\":{}", unread_count));
     out.push('}');
     out
 }
@@ -484,8 +505,15 @@ mod tests {
         let mut snap = sample_snapshot();
         snap.sessions[0].processes[0].command = "opencode --token hunter2-supersecret".to_string();
         snap.sessions[0].agent.evidence = vec!["cmd:opencode (pid 10)".to_string()];
-        let state =
-            snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &ConfigEcho::default());
+        let state = snapshot_to_state_json(
+            &snap,
+            &[],
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &[],
+            0,
+        );
         assert!(state.starts_with("{\"state_version\":3"), "{state}");
         assert!(state.contains("\"summary\":"), "{state}");
         assert!(state.contains("\"resumable\":[]"), "{state}");
@@ -520,6 +548,8 @@ mod tests {
             Some(&sum),
             &HashMap::new(),
             &ConfigEcho::default(),
+            &[],
+            0,
         );
         assert!(
             state.contains("\"summary\":{\"text\":\"All quiet.\""),
@@ -540,6 +570,8 @@ mod tests {
             Some(&sum),
             &HashMap::new(),
             &ConfigEcho::default(),
+            &[],
+            0,
         );
         assert!(state.contains("\"status\":\"error\""), "{state}");
         assert!(state.contains("\"message\":\"timeout\""), "{state}");
@@ -549,6 +581,8 @@ mod tests {
     /// String-aware JSON well-formedness: balanced {}[] outside strings,
     /// valid escapes, no trailing garbage. Catches brace bugs that
     /// substring assertions miss (e.g. a doubled closing brace).
+    /// NOTE: bracket balance alone does NOT catch missing commas
+    /// (`}{` balances!). Use [`assert_valid_json`] for real validation.
     fn assert_well_formed(json: &str) {
         let mut stack: Vec<char> = Vec::new();
         let mut chars = json.chars().peekable();
@@ -574,6 +608,172 @@ mod tests {
         assert!(stack.is_empty(), "unclosed brackets in {json}");
     }
 
+    /// Strict JSON validator (recursive descent): objects/arrays with
+    /// comma discipline, no trailing commas, complete consumption. The
+    /// bracket-balance checker above is blind to missing commas, which
+    /// broke a live state.json once — this one is not.
+    struct JsonParser<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> JsonParser<'a> {
+        fn new(s: &'a str) -> JsonParser<'a> {
+            JsonParser {
+                bytes: s.as_bytes(),
+                pos: 0,
+            }
+        }
+        fn ws(&mut self) {
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+                self.pos += 1;
+            }
+        }
+        fn lit(&mut self, s: &str) -> bool {
+            if self.bytes[self.pos..].starts_with(s.as_bytes()) {
+                self.pos += s.len();
+                true
+            } else {
+                false
+            }
+        }
+        fn string(&mut self) -> bool {
+            if self.bytes.get(self.pos) != Some(&b'"') {
+                return false;
+            }
+            self.pos += 1;
+            while self.pos < self.bytes.len() {
+                match self.bytes[self.pos] {
+                    b'"' => {
+                        self.pos += 1;
+                        return true;
+                    }
+                    b'\\' => self.pos += 2,
+                    _ => self.pos += 1,
+                }
+            }
+            false
+        }
+        fn number(&mut self) -> bool {
+            let start = self.pos;
+            if self.bytes.get(self.pos) == Some(&b'-') {
+                self.pos += 1;
+            }
+            let digits = self.pos;
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+            if self.pos == digits {
+                return false;
+            }
+            if self.bytes.get(self.pos) == Some(&b'.') {
+                self.pos += 1;
+                let f = self.pos;
+                while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+                    self.pos += 1;
+                }
+                if self.pos == f {
+                    return false;
+                }
+            }
+            if matches!(self.bytes.get(self.pos), Some(b'e') | Some(b'E')) {
+                self.pos += 1;
+                if matches!(self.bytes.get(self.pos), Some(b'+') | Some(b'-')) {
+                    self.pos += 1;
+                }
+                let f = self.pos;
+                while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+                    self.pos += 1;
+                }
+                if self.pos == f {
+                    return false;
+                }
+            }
+            self.pos > start
+        }
+        fn value(&mut self) -> bool {
+            self.ws();
+            if self.string() || self.number() {
+                return true;
+            }
+            if self.lit("true") || self.lit("false") || self.lit("null") {
+                return true;
+            }
+            if self.bytes.get(self.pos) == Some(&b'{') {
+                self.pos += 1;
+                self.ws();
+                if self.bytes.get(self.pos) == Some(&b'}') {
+                    self.pos += 1;
+                    return true;
+                }
+                loop {
+                    self.ws();
+                    if !self.string() {
+                        return false;
+                    }
+                    self.ws();
+                    if self.bytes.get(self.pos) != Some(&b':') {
+                        return false;
+                    }
+                    self.pos += 1;
+                    if !self.value() {
+                        return false;
+                    }
+                    self.ws();
+                    match self.bytes.get(self.pos) {
+                        Some(b',') => self.pos += 1,
+                        Some(b'}') => {
+                            self.pos += 1;
+                            return true;
+                        }
+                        _ => return false,
+                    }
+                }
+            }
+            if self.bytes.get(self.pos) == Some(&b'[') {
+                self.pos += 1;
+                self.ws();
+                if self.bytes.get(self.pos) == Some(&b']') {
+                    self.pos += 1;
+                    return true;
+                }
+                loop {
+                    if !self.value() {
+                        return false;
+                    }
+                    self.ws();
+                    match self.bytes.get(self.pos) {
+                        Some(b',') => self.pos += 1,
+                        Some(b']') => {
+                            self.pos += 1;
+                            return true;
+                        }
+                        _ => return false,
+                    }
+                }
+            }
+            false
+        }
+        fn document(&mut self) -> bool {
+            let ok = self.value();
+            self.ws();
+            ok && self.pos == self.bytes.len()
+        }
+    }
+
+    fn assert_valid_json(json: &str) {
+        assert!(JsonParser::new(json).document(), "invalid JSON: {json}");
+    }
+
+    #[test]
+    fn strict_validator_rejects_missing_commas() {
+        assert_valid_json("{\"a\":1,\"b\":[1,2],\"c\":null}");
+        assert!(!JsonParser::new("{\"a\":1\"b\":2}").document());
+        assert!(!JsonParser::new("[1,2,]").document());
+        assert!(!JsonParser::new("{\"a\":}").document());
+        assert!(!JsonParser::new("").document());
+    }
+
     #[test]
     fn all_artifacts_are_well_formed_json() {
         let snap = sample_snapshot();
@@ -586,6 +786,8 @@ mod tests {
             None,
             &HashMap::new(),
             &ConfigEcho::default(),
+            &[],
+            0,
         ));
         assert_well_formed(&snapshot_to_state_json(
             &snap,
@@ -593,6 +795,8 @@ mod tests {
             None,
             &HashMap::new(),
             &ConfigEcho::default(),
+            &[],
+            0,
         ));
         assert_well_formed(&snapshot_to_state_json(
             &snap,
@@ -600,6 +804,8 @@ mod tests {
             Some(&sum),
             &HashMap::new(),
             &ConfigEcho::default(),
+            &[],
+            0,
         ));
         assert_well_formed(&snapshot_to_state_json(
             &snap,
@@ -607,15 +813,34 @@ mod tests {
             Some(&StateSummary::error("timeout")),
             &HashMap::new(),
             &ConfigEcho::default(),
+            &[],
+            0,
         ));
+        let full = snapshot_to_state_json(
+            &snap,
+            &cps,
+            Some(&sum),
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &[sample_notification(9, "stopped", "attention")],
+            1,
+        );
+        assert_valid_json(&full);
     }
 
     #[test]
     fn timeline_fields_come_from_meta_or_unknown() {
         let snap = sample_snapshot();
         // No meta: unknown age, empty history, real root pid.
-        let bare =
-            snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &ConfigEcho::default());
+        let bare = snapshot_to_state_json(
+            &snap,
+            &[],
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &[],
+            0,
+        );
         assert!(bare.contains("\"age_secs\":null"), "{bare}");
         assert!(bare.contains("\"history\":\"\""), "{bare}");
         assert!(bare.contains("\"root_pid\":10"), "{bare}");
@@ -628,7 +853,8 @@ mod tests {
                 history: "RRS".to_string(),
             },
         );
-        let enriched = snapshot_to_state_json(&snap, &[], None, &meta, &ConfigEcho::default());
+        let enriched =
+            snapshot_to_state_json(&snap, &[], None, &meta, &ConfigEcho::default(), &[], 0);
         assert!(enriched.contains("\"age_secs\":3600"), "{enriched}");
         assert!(enriched.contains("\"history\":\"RRS\""), "{enriched}");
         assert_well_formed(&enriched);
@@ -669,11 +895,59 @@ mod tests {
     #[test]
     fn writer_carries_tier_and_group() {
         let snap = sample_snapshot();
-        let state =
-            snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &ConfigEcho::default());
+        let state = snapshot_to_state_json(
+            &snap,
+            &[],
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &[],
+            0,
+        );
         // sample project is /home/u/Work, unknown agent -> workspace tier.
         assert!(state.contains("\"tier\":\"workspace\""), "{state}");
         assert!(state.contains("\"group\":\"proj_def\""), "{state}");
+        assert_well_formed(&state);
+    }
+
+    fn sample_notification(id: i64, kind: &str, severity: &str) -> crate::store::Notification {
+        crate::store::Notification {
+            id,
+            kind: kind.to_string(),
+            session_id: "sess_abc".to_string(),
+            project_id: "proj_def".to_string(),
+            project_name: "Work".to_string(),
+            branch: None,
+            agent_kind: "opencode".to_string(),
+            state: "running".to_string(),
+            checkpoint_id: None,
+            created_at: 1_700_000_400,
+            read_at: None,
+            severity: severity.to_string(),
+            detail: "opencode on Work".to_string(),
+        }
+    }
+
+    #[test]
+    fn notifications_render_with_badge_count() {
+        let snap = sample_snapshot();
+        let notifs = vec![
+            sample_notification(1, "stopped", "attention"),
+            sample_notification(2, "appeared", "informational"),
+        ];
+        let state = snapshot_to_state_json(
+            &snap,
+            &[],
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &notifs,
+            1,
+        );
+        assert!(state.contains("\"notifications\":[{"), "{state}");
+        assert!(state.contains("\"kind\":\"stopped\""), "{state}");
+        assert!(state.contains("\"severity\":\"attention\""), "{state}");
+        assert!(state.contains("\"unread_count\":1"), "{state}");
         assert_well_formed(&state);
     }
 
@@ -685,7 +959,7 @@ mod tests {
             model: "prov/m".to_string(),
             summary_enabled: false,
         };
-        let state = snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &cfg);
+        let state = snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &cfg, &[], 0);
         assert!(state.contains("\"config\":{\"agent\":\"codex\""), "{state}");
         assert!(state.contains("\"summary_enabled\":false"), "{state}");
         assert_well_formed(&state);
@@ -694,8 +968,15 @@ mod tests {
     #[test]
     fn state_v3_absent_summary_is_null() {
         let snap = sample_snapshot();
-        let state =
-            snapshot_to_state_json(&snap, &[], None, &HashMap::new(), &ConfigEcho::default());
+        let state = snapshot_to_state_json(
+            &snap,
+            &[],
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &[],
+            0,
+        );
         assert!(state.contains("\"summary\":null"), "{state}");
     }
 
@@ -727,8 +1008,15 @@ mod tests {
             sample_checkpoint(2, "sess_old"),
             sample_checkpoint(1, "sess_older"),
         ];
-        let state =
-            snapshot_to_state_json(&snap, &cps, None, &HashMap::new(), &ConfigEcho::default());
+        let state = snapshot_to_state_json(
+            &snap,
+            &cps,
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &[],
+            0,
+        );
         // v1 shape intact (newest-first resumable is purely additive).
         assert!(state.contains("\"hostname\":\"test\\\"box\""), "{state}");
         assert!(state.contains("\"sessions\":[{"), "{state}");
@@ -754,8 +1042,15 @@ mod tests {
             cp.state = "flying".to_string(); // corrupt/foreign state
             cps.push(cp);
         }
-        let state =
-            snapshot_to_state_json(&snap, &cps, None, &HashMap::new(), &ConfigEcho::default());
+        let state = snapshot_to_state_json(
+            &snap,
+            &cps,
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &[],
+            0,
+        );
         let rpos = state.find("\"resumable\":[").unwrap();
         let body = &state[rpos..];
         assert_eq!(body.matches("\"checkpoint_id\"").count(), RESUMABLE_CAP);

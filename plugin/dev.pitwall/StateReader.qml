@@ -27,6 +27,13 @@ Item {
   readonly property int sessionCount: sessions.length
   // v2 additive key; absent on v1 (panel tolerates both).
   readonly property var resumable: (record && Array.isArray(record.resumable)) ? record.resumable : []
+  // v4 additive keys (M5g inbox): unread notification rows + badge count.
+  // Malformed shapes degrade to empty/zero, never a crash.
+  readonly property var notifications: (record && Array.isArray(record.notifications)) ? record.notifications : []
+  readonly property int unreadCount: {
+    var n = record ? Number(record.unread_count) : 0
+    return isFinite(n) && n > 0 ? Math.round(n) : 0
+  }
   // v3 additive key (M5d contract; M5f renders it). Null/absent means
   // no summary yet; malformed shapes degrade to null, never a crash.
   readonly property var summary: {

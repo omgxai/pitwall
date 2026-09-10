@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 /// CREATE-IF-NOT-EXISTS: v1/v2 databases keep all existing rows.
 /// (The v1→v2 recreate was a one-time pre-release exception; v2 holds
 /// user checkpoints, so M5d migrates additively — still no framework.)
-pub const STORE_SCHEMA_VERSION: i64 = 3;
+pub const STORE_SCHEMA_VERSION: i64 = 4;
 
 /// Bounded-cache policy: keep the newest N observations (and their
 /// sessions). One deterministic rule — no time-based second policy.
@@ -105,6 +105,25 @@ CREATE TABLE IF NOT EXISTS summaries (
   model      TEXT,
   created_at INTEGER NOT NULL
 );
+-- v4: human-relevant event inbox. Allowlist columns only (see
+-- Notification below); no argv/env/transcript/evidence/titles/notes.
+CREATE TABLE IF NOT EXISTS notifications (
+  id            INTEGER PRIMARY KEY,
+  kind          TEXT NOT NULL,
+  session_id    TEXT NOT NULL DEFAULT '',
+  project_id    TEXT NOT NULL DEFAULT '',
+  project_name  TEXT NOT NULL DEFAULT '',
+  branch        TEXT,
+  agent_kind    TEXT NOT NULL DEFAULT 'unknown',
+  state         TEXT NOT NULL DEFAULT 'unknown',
+  checkpoint_id INTEGER,
+  created_at    INTEGER NOT NULL,
+  read_at       INTEGER,
+  severity      TEXT NOT NULL DEFAULT 'informational',
+  detail        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_unread
+  ON notifications (read_at, created_at);
 ";
 
 /// Failures opening or using the store. All are degradable: the caller
@@ -274,13 +293,14 @@ impl Store {
                  DROP TABLE IF EXISTS observations;
                  DROP TABLE IF EXISTS checkpoints;
                  DROP TABLE IF EXISTS summaries;
+                 DROP TABLE IF EXISTS notifications;
                  DROP TABLE IF EXISTS meta;",
             )
             .map_err(StoreError::from)?;
             create_schema(&conn).map_err(StoreError::from)?;
         } else if version < STORE_SCHEMA_VERSION {
-            // Additive upgrade (v2 -> v3): create any missing tables,
-            // keep every existing row. No framework, one statement set.
+            // Additive upgrade (v2 -> v3 -> v4): create any missing
+            // tables, keep every existing row. No framework, one set.
             create_schema(&conn).map_err(StoreError::from)?;
         }
         Ok(Store {
@@ -571,7 +591,7 @@ impl Store {
             }
             let Some(p) = &s.project else { continue };
             let w = s.window.as_ref();
-            ids.push(self.insert_checkpoint(
+            let cp_id = self.insert_checkpoint(
                 now,
                 &p.id,
                 &s.id,
@@ -587,7 +607,23 @@ impl Store {
                 note,
                 trigger::MANUAL,
                 None,
-            )?);
+            )?;
+            ids.push(cp_id);
+            // Manual checkpoints are user-recorded context: informational
+            // record, never badged. Best-effort; checkpoint stands regardless.
+            let _ = self.notify(
+                notif_kind::CHECKPOINT,
+                &s.id,
+                &p.id,
+                &p.name,
+                p.branch.as_deref(),
+                s.agent.kind.as_str(),
+                s.state.as_str(),
+                Some(cp_id),
+                severity::INFORMATIONAL,
+                &format!("manual checkpoint on {}", p.name),
+                now,
+            );
         }
         Ok(ids)
     }
@@ -910,6 +946,426 @@ impl Store {
             .map_err(StoreError::from)?;
         Ok(n)
     }
+
+    /// Insert or refresh an unread notification (dedup: one unread row per
+    /// kind+session; a repeat refreshes created_at/detail in place instead
+    /// of stacking duplicates). Prunes to the newest MAX_NOTIFICATIONS rows
+    /// on every insert. Returns the row id.
+    ///
+    /// PRIVACY: allowlist columns only (see schema). Callers pass short
+    /// scrubbed detail text; there is no parameter for argv, env,
+    /// transcripts, evidence, titles, or notes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn notify(
+        &mut self,
+        kind: &str,
+        session_id: &str,
+        project_id: &str,
+        project_name: &str,
+        branch: Option<&str>,
+        agent_kind: &str,
+        state: &str,
+        checkpoint_id: Option<i64>,
+        severity: &str,
+        detail: &str,
+        created_at: i64,
+    ) -> Result<i64, StoreError> {
+        if !notif_kind::valid(kind) {
+            return Err(StoreError::Backend(format!(
+                "refusing unknown notification kind {kind:?}"
+            )));
+        }
+        if !severity::valid(severity) {
+            return Err(StoreError::Backend(format!(
+                "refusing unknown severity {severity:?}"
+            )));
+        }
+        let detail = truncate_detail(detail);
+        if let Some(existing) = self.unread_notification(kind, session_id)? {
+            self.conn
+                .execute(
+                    "UPDATE notifications SET created_at = ?1, detail = ?2,
+                     severity = ?3, project_name = ?4 WHERE id = ?5",
+                    rusqlite::params![created_at, detail, severity, project_name, existing],
+                )
+                .map_err(StoreError::from)?;
+            return Ok(existing);
+        }
+        self.insert_notification_row(
+            kind,
+            session_id,
+            project_id,
+            project_name,
+            branch,
+            agent_kind,
+            state,
+            checkpoint_id,
+            severity,
+            &detail,
+            created_at,
+        )
+    }
+
+    /// Raw insert without dedup (callers that already checked, or bulk
+    /// paths). Prefer [`Store::notify`] unless suppression is handled
+    /// by the caller.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_notification_row(
+        &self,
+        kind: &str,
+        session_id: &str,
+        project_id: &str,
+        project_name: &str,
+        branch: Option<&str>,
+        agent_kind: &str,
+        state: &str,
+        checkpoint_id: Option<i64>,
+        severity: &str,
+        detail: &str,
+        created_at: i64,
+    ) -> Result<i64, StoreError> {
+        if !notif_kind::valid(kind) {
+            return Err(StoreError::Backend(format!(
+                "refusing unknown notification kind {kind:?}"
+            )));
+        }
+        if !severity::valid(severity) {
+            return Err(StoreError::Backend(format!(
+                "refusing unknown severity {severity:?}"
+            )));
+        }
+        let id: i64 = self
+            .conn
+            .query_row(
+                "INSERT INTO notifications (kind, session_id, project_id, project_name,
+               branch, agent_kind, state, checkpoint_id, created_at, read_at,
+               severity, detail)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,?10,?11)
+             RETURNING id",
+                rusqlite::params![
+                    kind,
+                    session_id,
+                    project_id,
+                    project_name,
+                    branch,
+                    agent_kind,
+                    state,
+                    checkpoint_id,
+                    created_at,
+                    severity,
+                    detail,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)?;
+        self.enforce_notification_retention()?;
+        Ok(id)
+    }
+
+    /// Existing unread row id for a kind+session pair, if any.
+    pub fn unread_notification(
+        &self,
+        kind: &str,
+        session_id: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        let id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM notifications
+                 WHERE kind = ?1 AND session_id = ?2 AND read_at IS NULL
+                 ORDER BY created_at DESC LIMIT 1",
+                rusqlite::params![kind, session_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(id)
+    }
+
+    /// Recent notifications regardless of read state (CLI history view).
+    pub fn recent_notifications(&self, limit: i64) -> Result<Vec<Notification>, StoreError> {
+        self.list_notifications(false, limit)
+    }
+
+    /// Unread notifications, newest first (panel inbox + badge source).
+    pub fn unread_notifications(&self, limit: i64) -> Result<Vec<Notification>, StoreError> {
+        self.list_notifications(true, limit)
+    }
+
+    /// Badge count: unread attention + completion rows only. Informational
+    /// rows are listed, never badged.
+    pub fn unread_badge_count(&self) -> Result<i64, StoreError> {
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM notifications
+                 WHERE read_at IS NULL AND severity IN ('attention','completion')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)?;
+        Ok(n)
+    }
+
+    fn list_notifications(
+        &self,
+        unread_only: bool,
+        limit: i64,
+    ) -> Result<Vec<Notification>, StoreError> {
+        let sql = if unread_only {
+            "SELECT id, kind, session_id, project_id, project_name, branch,
+                    agent_kind, state, checkpoint_id, created_at, read_at,
+                    severity, detail FROM notifications
+             WHERE read_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ?1"
+        } else {
+            "SELECT id, kind, session_id, project_id, project_name, branch,
+                    agent_kind, state, checkpoint_id, created_at, read_at,
+                    severity, detail FROM notifications
+             ORDER BY created_at DESC, id DESC LIMIT ?1"
+        };
+        let mut stmt = self.conn.prepare(sql).map_err(StoreError::from)?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit], |row| {
+                Ok(Notification {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    session_id: row.get(2)?,
+                    project_id: row.get(3)?,
+                    project_name: row.get(4)?,
+                    branch: row.get(5)?,
+                    agent_kind: row.get(6)?,
+                    state: row.get(7)?,
+                    checkpoint_id: row.get(8)?,
+                    created_at: row.get(9)?,
+                    read_at: row.get(10)?,
+                    severity: row.get(11)?,
+                    detail: row.get(12)?,
+                })
+            })
+            .map_err(StoreError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?;
+        Ok(rows)
+    }
+
+    /// Mark one notification read. Returns true when a row flipped.
+    /// Reading is explicit (detail click) — rendering a list never marks.
+    pub fn mark_notification_read(&self, id: i64, now: i64) -> Result<bool, StoreError> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE notifications SET read_at = ?1
+                 WHERE id = ?2 AND read_at IS NULL",
+                rusqlite::params![now, id],
+            )
+            .map_err(StoreError::from)?;
+        Ok(n > 0)
+    }
+
+    /// Derive inbox rows for one snapshot transition (called after persist
+    /// writes the current observation). Pure diff, bounded output:
+    /// appeared/vanished informational, newly-stopped attention. Dedup
+    /// inside notify() keeps one unread per kind+session; continuous
+    /// absence never re-fires because last_sighting only advances on
+    /// reappearance (same suppression shape as disappearance checkpoints).
+    /// Returns new-or-refreshed row count. Never fails the snapshot.
+    pub fn sync_snapshot_notifications(
+        &mut self,
+        prev: &[PrevSession],
+        curr: &crate::collector::WorkspaceSnapshot,
+        now: i64,
+    ) -> Result<usize, StoreError> {
+        let prev_by_id: std::collections::HashMap<&str, &PrevSession> =
+            prev.iter().map(|p| (p.session_id.as_str(), p)).collect();
+        let curr_ids: std::collections::HashSet<&str> =
+            curr.sessions.iter().map(|s| s.id.as_str()).collect();
+        // Fire-only-on-new wrapper: an existing unread row for the same
+        // kind+session suppresses repeats (continuous absence or steady
+        // state must not re-notify every snapshot).
+        let mut fired = 0;
+        let fire_if_new = |store: &Store,
+                           kind: &str,
+                           session_id: &str,
+                           project_id: &str,
+                           project_name: &str,
+                           branch: Option<&str>,
+                           agent_kind: &str,
+                           state: &str,
+                           severity: &str,
+                           detail: &str,
+                           fired: &mut usize|
+         -> Result<(), StoreError> {
+            if store.unread_notification(kind, session_id)?.is_some() {
+                return Ok(());
+            }
+            store.insert_notification_row(
+                kind,
+                session_id,
+                project_id,
+                project_name,
+                branch,
+                agent_kind,
+                state,
+                None,
+                severity,
+                detail,
+                now,
+            )?;
+            *fired += 1;
+            Ok(())
+        };
+        for s in &curr.sessions {
+            let project_name = s
+                .project
+                .as_ref()
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "session".to_string());
+            let project_id = s.project.as_ref().map(|p| p.id.clone()).unwrap_or_default();
+            let branch = s.project.as_ref().and_then(|p| p.branch.clone());
+            match prev_by_id.get(s.id.as_str()) {
+                None => {
+                    fire_if_new(
+                        self,
+                        notif_kind::APPEARED,
+                        &s.id,
+                        &project_id,
+                        &project_name,
+                        branch.as_deref(),
+                        s.agent.kind.as_str(),
+                        s.state.as_str(),
+                        severity::INFORMATIONAL,
+                        &format!(
+                            "{} on {} \u{00b7} {}",
+                            s.agent.kind.as_str(),
+                            project_name,
+                            s.state.as_str()
+                        ),
+                        &mut fired,
+                    )?;
+                }
+                Some(p) => {
+                    if s.state.as_str() == "stopped" && p.state != "stopped" {
+                        fire_if_new(
+                            self,
+                            notif_kind::STOPPED,
+                            &s.id,
+                            &project_id,
+                            &project_name,
+                            branch.as_deref(),
+                            s.agent.kind.as_str(),
+                            s.state.as_str(),
+                            severity::ATTENTION,
+                            &format!("{} {} \u{2192} stopped", s.agent.kind.as_str(), p.state),
+                            &mut fired,
+                        )?;
+                    }
+                }
+            }
+        }
+        for p in prev {
+            if curr_ids.contains(p.session_id.as_str()) {
+                continue;
+            }
+            let project_name = p
+                .project_dir
+                .as_ref()
+                .and_then(|d| d.rsplit('/').next())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("session")
+                .to_string();
+            fire_if_new(
+                self,
+                notif_kind::VANISHED,
+                &p.session_id,
+                p.project_id.as_deref().unwrap_or_default(),
+                &project_name,
+                p.branch.as_deref(),
+                &p.agent_kind,
+                &p.state,
+                severity::INFORMATIONAL,
+                &format!("was {} {}", p.agent_kind, p.state),
+                &mut fired,
+            )?;
+        }
+        Ok(fired)
+    }
+
+    /// Bounded inbox: newest MAX_NOTIFICATIONS rows survive, oldest pruned.
+    fn enforce_notification_retention(&self) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "DELETE FROM notifications WHERE id NOT IN (
+                   SELECT id FROM notifications ORDER BY created_at DESC, id DESC LIMIT ?1
+                 )",
+                rusqlite::params![MAX_NOTIFICATIONS],
+            )
+            .map_err(StoreError::from)?;
+        Ok(())
+    }
+}
+
+/// Closed notification vocabulary. Anything else is rejected at insert
+/// (see [`Store::notify`]) — the inbox cannot become a generic log.
+pub mod notif_kind {
+    pub const APPEARED: &str = "appeared";
+    pub const VANISHED: &str = "vanished";
+    pub const STOPPED: &str = "stopped";
+    pub const CHECKPOINT: &str = "checkpoint";
+    pub const ASSIGN_DONE: &str = "assign-done";
+    pub const ASSIGN_FAILED: &str = "assign-failed";
+
+    pub fn valid(kind: &str) -> bool {
+        matches!(
+            kind,
+            APPEARED | VANISHED | STOPPED | CHECKPOINT | ASSIGN_DONE | ASSIGN_FAILED
+        )
+    }
+}
+
+/// Severity: only attention/completion feed the badge. Informational rows
+/// are listed, never badged.
+pub mod severity {
+    pub const ATTENTION: &str = "attention";
+    pub const COMPLETION: &str = "completion";
+    pub const INFORMATIONAL: &str = "informational";
+
+    pub fn valid(severity: &str) -> bool {
+        matches!(severity, ATTENTION | COMPLETION | INFORMATIONAL)
+    }
+}
+
+/// Maximum inbox rows (newest win; enforced on every insert).
+pub const MAX_NOTIFICATIONS: i64 = 100;
+
+/// Cap on persisted notification detail text (short human sentence).
+pub const MAX_NOTIFICATION_DETAIL_CHARS: usize = 140;
+
+fn truncate_detail(detail: &str) -> String {
+    let clean: String = detail.chars().filter(|c| !c.is_control()).collect();
+    if clean.chars().count() <= MAX_NOTIFICATION_DETAIL_CHARS {
+        return clean;
+    }
+    let mut out: String = clean.chars().take(MAX_NOTIFICATION_DETAIL_CHARS).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// One inbox row. Allowlist shape: identity refs + short scrubbed detail.
+/// No argv/env/transcript/evidence/titles/notes/pids by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub id: i64,
+    pub kind: String,
+    pub session_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub branch: Option<String>,
+    pub agent_kind: String,
+    pub state: String,
+    pub checkpoint_id: Option<i64>,
+    pub created_at: i64,
+    pub read_at: Option<i64>,
+    pub severity: String,
+    pub detail: String,
 }
 
 /// Previous-observation session facts for read-time event derivation.
@@ -1645,6 +2101,249 @@ mod tests {
             .unwrap();
         assert!(tables.contains(&"checkpoints".to_string()));
         assert!(tables.contains(&"observations".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn notif(store: &mut Store, kind: &str, session: &str, severity: &str, at: i64) -> i64 {
+        store
+            .notify(
+                kind,
+                session,
+                "proj_x",
+                "Work",
+                Some("main"),
+                "opencode",
+                "running",
+                None,
+                severity,
+                "detail text",
+                at,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn notifications_insert_dedup_read_and_prune() {
+        let dir = test_dir("notif-crud");
+        let mut store = Store::open(&dir.join("pitwall.db")).unwrap();
+        assert_eq!(store.unread_badge_count().unwrap(), 0);
+        let id1 = notif(
+            &mut store,
+            notif_kind::STOPPED,
+            "sess_a",
+            severity::ATTENTION,
+            100,
+        );
+        // Repeat kind+session refreshes in place instead of duplicating.
+        let id2 = notif(
+            &mut store,
+            notif_kind::STOPPED,
+            "sess_a",
+            severity::ATTENTION,
+            200,
+        );
+        assert_eq!(id1, id2);
+        assert_eq!(store.unread_notifications(10).unwrap().len(), 1);
+        // Attention feeds the badge; informational does not.
+        notif(
+            &mut store,
+            notif_kind::APPEARED,
+            "sess_b",
+            severity::INFORMATIONAL,
+            300,
+        );
+        assert_eq!(store.unread_badge_count().unwrap(), 1);
+        notif(
+            &mut store,
+            notif_kind::ASSIGN_DONE,
+            "sess_c",
+            severity::COMPLETION,
+            400,
+        );
+        assert_eq!(store.unread_badge_count().unwrap(), 2);
+        // Explicit read flips one row; listing never marks.
+        assert!(store.mark_notification_read(id1, 500).unwrap());
+        assert!(!store.mark_notification_read(id1, 500).unwrap());
+        assert_eq!(store.unread_badge_count().unwrap(), 1);
+        assert_eq!(store.unread_notifications(10).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notifications_reject_closed_vocab_and_prune_to_cap() {
+        let dir = test_dir("notif-guard");
+        let mut store = Store::open(&dir.join("pitwall.db")).unwrap();
+        assert!(store
+            .notify(
+                "process-spawned",
+                "s",
+                "p",
+                "w",
+                None,
+                "x",
+                "y",
+                None,
+                severity::ATTENTION,
+                "d",
+                1
+            )
+            .is_err());
+        assert!(store
+            .notify(
+                notif_kind::APPEARED,
+                "s",
+                "p",
+                "w",
+                None,
+                "x",
+                "y",
+                None,
+                "urgent!!!",
+                "d",
+                1
+            )
+            .is_err());
+        for i in 0..(MAX_NOTIFICATIONS + 10) {
+            notif(
+                &mut store,
+                notif_kind::APPEARED,
+                &format!("sess_{i}"),
+                severity::INFORMATIONAL,
+                1000 + i,
+            );
+        }
+        let rows = store.unread_notifications(MAX_NOTIFICATIONS + 50).unwrap();
+        assert_eq!(rows.len() as i64, MAX_NOTIFICATIONS);
+        // Newest survive (highest created_at).
+        assert!(rows
+            .iter()
+            .any(|n| n.session_id == format!("sess_{}", MAX_NOTIFICATIONS + 9)));
+        assert!(!rows.iter().any(|n| n.session_id == "sess_0"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notifications_table_carries_no_banned_columns() {
+        let dir = test_dir("notif-privacy");
+        let db = dir.join("pitwall.db");
+        let mut store = Store::open(&db).unwrap();
+        notif(
+            &mut store,
+            notif_kind::STOPPED,
+            "sess_a",
+            severity::ATTENTION,
+            1,
+        );
+        drop(store);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('notifications') ORDER BY cid")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for banned in [
+            "argv",
+            "env",
+            "transcript",
+            "evidence",
+            "command",
+            "title",
+            "note",
+            "prompt",
+            "text",
+        ] {
+            assert!(
+                !cols.iter().any(|c| c == banned),
+                "banned column {banned}: {cols:?}"
+            );
+        }
+        for required in [
+            "id",
+            "kind",
+            "session_id",
+            "severity",
+            "detail",
+            "created_at",
+            "read_at",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == required),
+                "missing {required}: {cols:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_derives_appeared_vanished_stopped() {
+        use crate::collector::{SessionState, TerminalSession, WindowRole, WorkspaceSnapshot};
+        use crate::platform::WindowInfo;
+        fn sess(id: &str, state: SessionState) -> TerminalSession {
+            TerminalSession {
+                id: id.to_string(),
+                window: Some(WindowInfo {
+                    address: "0x1".to_string(),
+                    class: "foot".to_string(),
+                    initial_class: "foot".to_string(),
+                    title: "t".to_string(),
+                    workspace: "1".to_string(),
+                    pid: 10,
+                }),
+                root_pid: 10,
+                role: WindowRole::Terminal,
+                project: None,
+                agent: crate::collector::AgentIdentity {
+                    kind: crate::collector::AgentKind::Unknown,
+                    confidence: crate::collector::Confidence::Low,
+                    evidence: Vec::new(),
+                },
+                state,
+                process_count: 1,
+                processes: Vec::new(),
+                last_activity_epoch: 1,
+                last_activity_kind: crate::collector::LAST_ACTIVITY_KIND,
+                summary: String::new(),
+            }
+        }
+        let dir = test_dir("notif-sync");
+        let mut store = Store::open(&dir.join("pitwall.db")).unwrap();
+        // Seed previous observation: sess_old (running) + sess_gone.
+        let mut snap0 = WorkspaceSnapshot {
+            schema_version: 1,
+            collected_at_epoch: 100,
+            hostname: "h".to_string(),
+            sessions: vec![
+                sess("sess_old", SessionState::Running),
+                sess("sess_gone", SessionState::Sleeping),
+            ],
+        };
+        let obs0 = match store.persist(&snap0).unwrap() {
+            PersistOutcome::Written { observation_id } => observation_id,
+            PersistOutcome::Unchanged => panic!("must write"),
+        };
+        assert!(obs0 > 0);
+        // Current: sess_old stopped, sess_gone absent, sess_new present.
+        snap0.sessions[0].state = SessionState::Stopped;
+        snap0.sessions.retain(|s| s.id != "sess_gone");
+        snap0.sessions.push(sess("sess_new", SessionState::Running));
+        let prev = store.observation_sessions(obs0).unwrap();
+        let n = store
+            .sync_snapshot_notifications(&prev, &snap0, 200)
+            .unwrap();
+        assert_eq!(n, 3, "appeared + vanished + stopped");
+        assert_eq!(
+            store.unread_badge_count().unwrap(),
+            1,
+            "only stopped badges"
+        );
+        // Repeat run fires nothing new (dedup: same continuous states).
+        let n2 = store
+            .sync_snapshot_notifications(&prev, &snap0, 300)
+            .unwrap();
+        assert_eq!(n2, 0, "dedup must suppress repeats: got {n2}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
