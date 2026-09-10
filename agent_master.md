@@ -161,6 +161,46 @@ awaiting follow-up. Next: user decides (more M5g slices or stand down).
 
 ---
 
+## 2026-09-10 — M5g tree/grouping + Assign backend (PRE)
+
+### Objective
+First M5g hardening slice from dogfood wave 1: semantic display
+hierarchy + project grouping (Child 1 UI proposal + Child 2 systems
+proof, both reviewed), plus the Assign-task backend both reports
+converged on needing.
+
+### Child work (reviewed)
+- Child 1: collapsed-by-default tree, icon-first tiers (19 glyphs
+  fc-query-verified — spot-verified all 10 used), native scrollbar,
+  R3/R4 trims. PARTIALLY adopted: rejected R1/R2 (brief §17 requires
+  state+agent lines in detail), accepted rest.
+- Child 2: Assign = foreground sync spawn reusing summary/runner
+  shapes, strict validation chain, no persistence, MAX_PROMPT 4000,
+  scrub second layer. Adopted with role-as-display-label.
+
+### PRE decision & implementation
+Smallest coherent slice: (1) /proc|sys|dev cwd exclusion at source;
+(2) pure tier_for/group_for + additive state fields (sessions AND
+resumable); (3) QML grouped rail reusing SessionBar/cards/actions;
+(4) `pitwall assign` (validate→spawn→filter, no storage) + QML
+mini-form in pinned card; (5) collapsed default, tier icons, native
+scrollbar, R3/R4 trims, crash-artifact dismissal.
+No identity/schema/DB changes (additive fields only).
+
+### Verified result
+- Gate green (fmt/clippy/107 tests incl. 9 new).
+- Live: grouped tree screenshot (tiers, counts, muted history);
+  expanded render with segments; collapsed default after restart;
+  assign refusals live (malformed/vanished/long); SIGTERM argv
+  proven; zero QML errors across restarts.
+- Children logs untouched by PRE (theirs to commit).
+
+### Status
+Implemented by PRE (cross-cutting integration). Children idle.
+Next: user decides (more M5g slices or stand down).
+
+---
+
 ## CURRENT STATE
 
 - Latest verified commit: `6a336df` (== origin/main; only children

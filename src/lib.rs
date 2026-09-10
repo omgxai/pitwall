@@ -5,6 +5,7 @@
 //! behind a trait so the core never touches OS APIs directly.
 
 pub mod agents;
+pub mod assign;
 pub mod collector;
 pub mod config;
 pub mod context;

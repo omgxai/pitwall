@@ -7,6 +7,9 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M5g workforce control: collapsed-by-default project tree, icon-first
+  tiers, native scrollbar, `pitwall assign` (validated foreground agent
+  run, no persistence), in-card assign form, R3/R4 density trims.
 - M5g semantic tree: tier/group presentation fields (pitwall-native >
   agents > workspace > system), project-grouped rail with collapse,
   /proc-/sys-/dev-cwd exclusion fix, resumable confidence display.

@@ -39,6 +39,7 @@ fn print_help() {
     println!("    models           List models for an agent (--agent ID, default opencode)");
     println!("    summarize        Ask the configured agent for a workspace summary");
     println!("    config             Get/set user configuration (get [key] | set <key> <value>)");
+    println!("    assign           Assign a task to a live session (--session-id ID --role ROLE --prompt TEXT [--model P/M] [--timeout SECS])");
     println!("                     [--agent ID] [--model P/M] [--dir DIR]");
     println!("                     [--timeout SECS] [--dry-run] [--clear] [--data-dir DIR]");
 }
@@ -807,6 +808,84 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
     }
 }
 
+/// Explicit workforce assignment (M5g): one foreground agent run for
+/// one live session. Human click required upstream; this CLI validates,
+/// spawns, waits, filters, and prints the result text. No persistence,
+/// no background execution, no fallbacks.
+fn cmd_assign(args: &[String]) -> ExitCode {
+    let mut session_id: Option<String> = None;
+    let mut role = "Worker".to_string();
+    let mut prompt: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut timeout_secs = pitwall_lib::summary::DEFAULT_TIMEOUT_SECS;
+    let mut data_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--session-id" => {
+                i += 1;
+                session_id = args.get(i).cloned();
+            }
+            "--role" => {
+                i += 1;
+                if let Some(r) = args.get(i) {
+                    role = r.clone();
+                }
+            }
+            "--prompt" => {
+                i += 1;
+                prompt = args.get(i).cloned();
+            }
+            "--model" => {
+                i += 1;
+                model = args.get(i).cloned();
+            }
+            "--timeout" => {
+                i += 1;
+                match args.get(i).and_then(|v| v.parse::<u64>().ok()) {
+                    Some(t) if (5..=600).contains(&t) => timeout_secs = t,
+                    _ => {
+                        eprintln!("pitwall assign: --timeout must be 5..600 seconds");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--data-dir" => {
+                i += 1;
+                data_dir = args.get(i).map(PathBuf::from);
+            }
+            other => {
+                eprintln!("pitwall assign: unknown option '{other}'.");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+    let (Some(sid), Some(prompt)) = (session_id, prompt) else {
+        eprintln!("pitwall assign: --session-id and --prompt are required");
+        return ExitCode::from(2);
+    };
+    let dir = data_dir.unwrap_or_else(store::default_data_dir);
+    let db = dir.join(store::DB_FILENAME);
+    match pitwall_lib::assign::prepare(&platform(), &db, &sid, &role, &prompt, model.as_deref()) {
+        Ok(a) => match pitwall_lib::assign::execute(&a, std::time::Duration::from_secs(timeout_secs)) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("pitwall assign: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Err(e) => {
+            let code = if e.contains("malformed") || e.contains("usage") { 2 } else { 1 };
+            eprintln!("pitwall assign: {e}");
+            ExitCode::from(code)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -841,6 +920,7 @@ fn main() -> ExitCode {
         Some("models") => cmd_models(&args[1..]),
         Some("summarize") => cmd_summarize(&args[1..]),
         Some("config") => cmd_config(&args[1..]),
+        Some("assign") => cmd_assign(&args[1..]),
         Some(other) => {
             eprintln!("pitwall: unknown subcommand '{other}'. Run `pitwall --help`.");
             ExitCode::from(2)

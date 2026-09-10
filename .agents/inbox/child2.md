@@ -1,19 +1,22 @@
 # INBOX — Child 2 (Pitwall Systems Engineer)
 
-## TASK-002 (assigned 2026-09-10, M5g hardening): grouping-correctness audit
+## TASK-003 (assigned 2026-09-10, M5g hardening): assignment backend audit
 
-- OBJECTIVE: Determine, with evidence: which processes are roots vs
-  children; which sessions share a project (deterministic key);
-  whether any duplicates are illegitimate; what derived presentation
-  grouping field (if any) can safely support the UI tree. Prefer a
-  derived field over identity changes; no new database unless you can
-  prove it unavoidable (you likely cannot — argue it).
-- READ: `src/collector.rs`, `src/ids.rs`, `src/store.rs` (read-only),
-  live `./target/debug/pitwall status --json` (rebuild only if binary
-  missing).
-- FILE OWNERSHIP: read-only. No code changes, no commits, no redesign.
-- DO NOT TOUCH: `plugin/` visuals, security posture, cloud anything.
-- ACCEPTANCE: findings appended to `agent_child2.md` (roots/children
-  table, project-sharing verdict, grouping-key proposal) +
+- OBJECTIVE: Determine the safest architecture for assigning a prompt
+  to a selected Pitwall session (future `+ Assign` flow): available
+  agent invocation mechanism, fixed-argv construction, project/session
+  targeting, role/name handling (display label only vs identity),
+  lifecycle tracking, failure handling, privacy implications
+  (no secrets/env/transcript in prompts; prompt length caps).
+- READ: `src/agents.rs`, `src/summary.rs` (fixed-argv precedent),
+  `src/resume.rs` (validation precedent), `src/store.rs`,
+  `src/collector.rs` identity.
+- CONSTRAINTS: no shell interpolation, no arbitrary commands, explicit
+  human click required, no background execution, no session merging,
+  no new database unless proven unavoidable, no orchestration framework.
+- FILE OWNERSHIP: read-only. No code changes, no commits.
+- DO NOT TOUCH: `plugin/` visuals.
+- ACCEPTANCE: findings appended to `agent_child2.md` (mechanism table,
+  argv shape, validation rules, lifecycle/failure/privacy analysis) +
   `.agents/status/child2.md` → COMPLETE with summary.
 - PRIORITY: P1.

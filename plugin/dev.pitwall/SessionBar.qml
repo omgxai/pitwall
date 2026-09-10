@@ -1,4 +1,6 @@
 import QtQuick
+import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
@@ -29,9 +31,59 @@ Column {
   property bool canClose: false
   property bool canResume: false
   property string resumeTooltip: "Resume"
+  // Assign flow (live sessions only): inline mini-form, fixed argv,
+  // explicit Assign click. Display labels only; validation enforced
+  // again in Rust before anything spawns.
+  property bool canAssign: false
+  property bool assigning: false
+  property string assignRole: "UI Auditor"
+  property string assignResult: ""
+  property bool assignRunning: false
 
   signal clicked()
   signal hovered(bool isHovered)
+
+  // Assignment execution: fixed argv, validated session id, capped
+  // prompt. No shell, no interpolation. Result is display text only.
+  function submitAssign(promptText) {
+    var sid = String((entry && entry.id) || "")
+    if (!/^sess_[0-9a-f]{16}$/.test(sid)) {
+      assignResult = "Refusing: invalid session id."
+      return
+    }
+    var prompt = String(promptText || "").trim()
+    if (prompt === "") {
+      assignResult = "Describe the task first."
+      return
+    }
+    assignRunning = true
+    assignResult = ""
+    assignProc.sessionId = sid
+    assignProc.command = [
+      "pitwall", "assign",
+      "--session-id", sid,
+      "--role", String(assignRole),
+      "--prompt", prompt
+    ]
+    assignProc.running = true
+  }
+
+  Process {
+    id: assignProc
+    property string sessionId: ""
+    stdout: StdioCollector { id: assignOut }
+    stderr: StdioCollector {}
+    onExited: function(code) {
+      root.assignRunning = false
+      if (code === 0) {
+        var t = String(assignOut.text || "").trim().replace(/\s+/g, " ")
+        root.assignResult = t === "" ? "Done (no output)." : ("Result: " + t.slice(0, 280))
+      } else {
+        root.assignResult = "Assignment failed — see shell log."
+        console.warn("pitwall", "assign exited", code, "for", assignProc.sessionId)
+      }
+    }
+  }
   signal focusRequested()
   signal stopRequested()
   signal closeRequested()
@@ -236,6 +288,63 @@ Column {
         renderType: Text.NativeRendering
       }
 
+      // Assign mini-form: prompt + role + explicit Assign. Inline in
+      // the pinned card (no floating popup, stable geometry).
+      Column {
+        visible: root.assigning
+        width: parent.width
+        spacing: Style.space(6)
+
+        TextField {
+          id: assignPrompt
+          width: parent.width
+          placeholderText: "Task for this session…"
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Dropdown {
+          id: assignRole
+          width: parent.width
+          label: "Role"
+          value: root.assignRole
+          options: ["UI Auditor", "Systems", "Reviewer", "Researcher", "QA"]
+          onChanged: function(v) { root.assignRole = v }
+        }
+
+        Row {
+          spacing: Style.space(8)
+
+          Button {
+            text: root.assignRunning ? "Working…" : "Assign"
+            enabled: !root.assignRunning && assignPrompt.text.trim() !== ""
+            onClicked: root.submitAssign(assignPrompt.text)
+          }
+
+          Button {
+            text: "Cancel"
+            enabled: !root.assignRunning
+            onClicked: {
+              root.assigning = false
+              root.assignResult = ""
+            }
+          }
+        }
+
+        Text {
+          visible: root.assignResult !== ""
+          width: parent.width
+          textFormat: Text.PlainText
+          wrapMode: Text.Wrap
+          maximumLineCount: 4
+          elide: Text.ElideRight
+          text: root.assignResult
+          color: Qt.darker(Color.foreground, 1.4)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          renderType: Text.NativeRendering
+        }
+      }
+
       Row {
         spacing: Style.space(4)
 
@@ -269,6 +378,17 @@ Column {
           tooltipText: root.resumeTooltip
           focusable: true
           onClicked: root.resumeRequested()
+        }
+
+        PanelActionButton {
+          visible: root.canAssign
+          iconText: "+"
+          tooltipText: "Assign a task to this session"
+          focusable: true
+          onClicked: {
+            root.assigning = !root.assigning
+            root.assignResult = ""
+          }
         }
       }
     }

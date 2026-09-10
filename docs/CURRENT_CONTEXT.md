@@ -61,8 +61,9 @@ CLI surface (all explicit, no daemons): `status [--json]`, `snapshot
 [--db/--state/--data-dir]`, `checkpoint [--note --session-id]`,
 `resume --session-id` (focus live or open validated terminal; never
 agents), `agents`, `models [--agent]`, `summarize [--agent --model
---dir --timeout --dry-run --clear]`, `config get|set` (agent, model,
-summary_enabled only). Exit codes: 0 ok, 1 operational failure,
+--dir --timeout --dry-run --clear]`, `assign --session-id --role
+--prompt [--model --timeout]` (validated foreground agent run, no
+persistence), `config get|set` (agent, model, summary_enabled only). Exit codes: 0 ok, 1 operational failure,
 2 usage error.
 
 ## 3. Architecture
@@ -103,7 +104,7 @@ ephemeral `status --json` output.
 | M5d | IMPLEMENTED | Summary cache + state v3 | `41aaa03` |
 | M5e | IMPLEMENTED | Pixel flag identity | `63a85e8` |
 | M5f | IMPLEMENTED | Timeline rail + interactions + polish | `09106f9`+`b193021`+`c57e6f9` |
-| M5g | PLANNED | Hardening only (no features) | — |
+| M5g | IN PROGRESS | Hardening: semantic tree + assign backend done; further slices per dogfood | — |
 
 M5 UI is feature-frozen. 104 unit tests; `cargo fmt/clippy/test` gate.
 
@@ -122,10 +123,13 @@ bar); pinned card (state/agent/window/project lines + actions);
 resumable history rows (muted, short-hash distinguishable); settings
 view swaps the body.
 
-Intended display hierarchy (DIRECTION, not yet implemented — live order
-is recency-only): 1. Pitwall-native → 2. AI agents → 3. workspace/apps
-→ 4. Omarchy/system; recency within categories. Pitwall must never
-become a flat process monitor.
+Display hierarchy (IMPLEMENTED wave M5g-1): tier captions
+(PITWALL-NATIVE → AGENTS → WORKSPACE → SYSTEM) with collapsible
+project groups (default collapsed) and recency within; resumable
+history merged muted into groups. Pitwall must never become a flat
+process monitor.
+Assign flow: pinned card `+ Assign` → inline prompt/role form →
+`pitwall assign` (validated, foreground, result shown in card).
 
 ## 7. Session Identity / Grouping
 

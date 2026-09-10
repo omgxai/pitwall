@@ -383,7 +383,14 @@ Panel {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: ScrollBar {
+          policy: ScrollBar.AsNeeded
+          contentItem: Rectangle {
+            implicitWidth: Style.space(6)
+            radius: width / 2
+            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.28)
+          }
+        }
 
         Column {
           id: column
@@ -540,6 +547,7 @@ Panel {
               spacing: Style.space(4)
 
               Item {
+                visible: root.summaryText() !== ""
                 width: parent.width
                 height: summaryBody.implicitHeight
                 clip: true
@@ -659,16 +667,31 @@ Panel {
                 spacing: Style.space(4)
                 visible: modelData.visible
 
-                Text {
+                Row {
                   visible: modelData.kind === "tier"
                   width: parent.width
-                  textFormat: Text.PlainText
-                  text: modelData.label
-                  color: Qt.darker(Color.foreground, 1.6)
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                  renderType: Text.NativeRendering
+                  spacing: Style.space(6)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.tierIcon(modelData.label)
+                    color: Qt.darker(Color.foreground, 1.4)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    renderType: Text.NativeRendering
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: modelData.label
+                    color: Qt.darker(Color.foreground, 1.6)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    renderType: Text.NativeRendering
+                  }
                 }
 
                 Item {
@@ -695,7 +718,7 @@ Panel {
                     textFormat: Text.PlainText
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    text: modelData.collapsed ? "▴" : "▾"
+                    text: modelData.collapsed ? String.fromCodePoint(0xF0142) : String.fromCodePoint(0xF0140)
                     color: Qt.darker(Color.foreground, 1.4)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
@@ -725,6 +748,7 @@ Panel {
                     canStop: !modelData.hist
                     canClose: !modelData.hist
                     canResume: modelData.hist
+                    canAssign: !modelData.hist
                     resumeTooltip: modelData.hist ? root.resumeTooltipFor(modelData.ref) : ""
                     onClicked: {
                       root.selectedId = (root.selectedId === modelData.selId) ? "" : modelData.selId
@@ -751,7 +775,8 @@ Panel {
   // tier via the pre-sorted live/resumable arrays. Groups key on shared
   // project id, singletons on their own id. Collapsed state is a plain
   // object keyed by group key (reassigned wholesale so bindings fire).
-  property var collapsedGroups: ({})
+  // Groups start collapsed (expandedGroups empty); headers toggle.
+  // Collapsed default keeps the rail a project map, not a process list.
   readonly property var tierOrder: ["pitwall-native", "agents", "workspace", "system"]
   readonly property var tierLabels: ({
     "pitwall-native": "PITWALL-NATIVE",
@@ -760,11 +785,21 @@ Panel {
     "system": "SYSTEM"
   })
 
+  property var expandedGroups: ({})
   function toggleGroup(key) {
     var next = {}
-    for (var k in collapsedGroups) next[k] = collapsedGroups[k]
+    for (var k in expandedGroups) next[k] = expandedGroups[k]
     next[key] = !next[key]
-    collapsedGroups = next
+    expandedGroups = next
+  }
+
+  // Tier icons: verified Nerd codepoints only (coverage table in the
+  // plugin README). Glyph never carries meaning alone — tier word follows.
+  function tierIcon(label) {
+    if (label === "PITWALL-NATIVE") return String.fromCodePoint(0xF024)
+    if (label === "AGENTS") return String.fromCodePoint(0xF007)
+    if (label === "WORKSPACE") return String.fromCodePoint(0xF07B)
+    return String.fromCodePoint(0xF0AD)
   }
 
   function groupDisplayName(entries) {
@@ -816,7 +851,7 @@ Panel {
           entries.push({ kind: "hist", hist: true, ref: g.hist[hi], selId: "r:" + String(g.hist[hi].session_id || "") })
         }
         if (entries.length === 0) continue
-        collapsed = !!collapsedGroups[g.key]
+        collapsed = !expandedGroups[g.key]
         tierGroups.push({ kind: "group", key: g.key, label: groupDisplayName(entries), collapsed: collapsed, entries: collapsed ? [] : entries })
       }
       if (tierGroups.length === 0) continue
@@ -868,7 +903,7 @@ Panel {
       var w = s.window || null
       var win = w ? String(w.class || "?") : "no window"
       var ws = (w && w.workspace) ? " · workspace " + w.workspace : ""
-      parts.push("window  " + win + ws + " · " + Number(s.process_count || 0) + " procs")
+      parts.push("window  " + win + ws)
       var p = s.project || null
       if (p) {
         var git = p.branch ? p.branch : "no branch"
@@ -899,7 +934,7 @@ Panel {
   // the whole paragraph: the rail is an instrument, not a reader.
   function summaryText() {
     var full = summaryShort()
-    if (full === "") return "No summary yet."
+    if (full === "") return ""
     if (full.length <= 170) return full
     var cut = full.slice(0, 160)
     var sp = cut.lastIndexOf(" ")
