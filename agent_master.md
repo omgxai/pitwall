@@ -201,13 +201,48 @@ Next: user decides (more M5g slices or stand down).
 
 ---
 
-## CURRENT STATE
+## 2026-09-10 — M5 freeze + next-sprint plan + brand asset (PRE, travel handoff)
 
-- Latest verified commit: `6a336df` (== origin/main; only children
-  logs remain uncommitted, theirs).
+### Objective
+Documentation + future-readiness pass only. No features, no QML
+redesign, no Rust refactor. Freeze the verified M5/M5g state, record
+the notification baseline, add supplied brand art, plan the next
+sprint for tomorrow. User travelling.
+
+### Implementation
+- Code freeze `2d49bb4`: notification inbox slice (table schema v4,
+  sync events, CLI list/read, state.json inbox + badge, panel dots/
+  rows/group counts, header-out-of-Flickable + brace fix). Gate green
+  (fmt/clippy/118 tests); live-verified (open-panel screenshot, read
+  path shrinks unread list, fresh events derive).
+- Asset `31184e3`: `assets/pitwallpixelart.jpeg` (byte-identical copy,
+  discovery art; flag stays UI identity).
+- Docs (this commit): `docs/NEXT_SPRINT.md` (P0 hardening → P7
+  sharing, acceptance criteria, open questions); CURRENT_CONTEXT
+  freeze update; ROADMAP pointer; CHANGELOG + README notes.
+- Principle locked: notification = "something happened"; AI summary
+  = "what does the situation mean". Future chat/channel/bootstrap/
+  context/cloud/sharing all marked FUTURE, none started.
+
+### Verification
+- `qmllint` clean (import warnings only); shell reload zero errors.
+- Commercial-term scan on docs (below); links checked.
+- Child-owned logs untouched (still modified, theirs).
+
+### Status
+Frozen for today. Next session starts at `docs/NEXT_SPRINT.md`.
+
+---
+
+## CURRENT STATE (2026-09-10 freeze)
+
+- Frozen on `main`: notification code (`2d49bb4`) + brand asset
+  (`31184e3`) + docs (this push). Working tree holds only
+  child-owned logs (theirs, uncommitted).
+- M5 + M5g slices (tree, assign, inbox) IMPLEMENTED and VERIFIED;
+  project FROZEN. Next: `docs/NEXT_SPRINT.md`.
 - Active child agents: Child 1 + Child 2 COMPLETE but sessions alive
-  (awaiting follow-up or dismissal).
-- M5g backlog (prioritized): semantic display hierarchy; twin
-  disambiguation; summary-freshness signal; unknown label/color;
-  transient/zombie count semantics.
-- Next action: user decides — child log commit, M5g kickoff, or stand down.
+  (awaiting follow-up or dismissal) — unchanged, not PRE's to close.
+- Open hardening items (next sprint P0): twin disambiguation,
+  summary-freshness signal, unknown label/color, transient-count
+  semantics. Future (P1+): see `docs/NEXT_SPRINT.md`.

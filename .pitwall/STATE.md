@@ -465,3 +465,16 @@
 - `cargo build` + `./target/debug/pitwall --version` → `pitwall 0.1.0`.
 - Secret scan — clean (only match is the scanner's own regex in ci.yml).
 - `git status` — only intentional M0 files; `target/` ignored; `kerdos` untouched.
+
+## Completed work (M5g notification freeze, 2026-09-10)
+
+- [x] `notifications` table (schema v4, closed kind/severity vocab,
+  dedup, 100-cap, pinned columns) + sync-derived appeared/vanished/
+  stopped + assign completion/attention; `notifications` CLI
+  (list/read); state.json unread rows (cap 20) + badge count.
+- [x] Panel inbox: unread dots, card rows (max 3 + more), group
+  counts, header badge, explicit-read contract; header outside the
+  scroll Flickable (brace fix, qmllint-clean).
+- [x] Brand art `assets/pitwallpixelart.jpeg` (flag stays UI identity).
+- [x] Next-sprint plan `docs/NEXT_SPRINT.md`; project FROZEN for the
+  day (travel handoff). Gate: fmt/clippy clean, 118 tests passed.

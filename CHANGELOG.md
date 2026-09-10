@@ -7,6 +7,16 @@ All notable changes to Pitwall are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- M5g notification inbox (frozen): `notifications` table (schema v4,
+  closed vocab, dedup, 100-cap, pinned columns), sync-derived
+  appeared/vanished/stopped + assign completion/attention events,
+  `state.json` unread rows (cap 20) + badge count,
+  `pitwall notifications [--unread]` / `read <id>`, panel unread
+  dots + inbox rows + group counts + header badge (explicit-read
+  contract). Notification = "something happened"; summary = "what
+  it means".
+- Brand artwork: `assets/pitwallpixelart.jpeg` (discovery art;
+  16px flag stays the UI identity).
 - M5g workforce control: collapsed-by-default project tree, icon-first
   tiers, native scrollbar, `pitwall assign` (validated foreground agent
   run, no persistence), in-card assign form, R3/R4 density trims.

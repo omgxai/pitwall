@@ -1,7 +1,10 @@
 # Pitwall Current Context
 
 > Compact handover for the next AI session. Read this + `agent_master.md`;
-> Git remains source of truth for code. Written 2026-09-10 at HEAD `99e1d0d`.
+> Git remains source of truth for code. Written 2026-09-10 at freeze
+> series `2d49bb4` (code) + `31184e3` (asset); this file lands in the
+> docs-freeze commit on top — verify with `git log --oneline -3`.
+> M5/M5g is FROZEN. No new features until the next sprint starts.
 
 ## 1. Product Identity
 
@@ -30,10 +33,22 @@ All IMPLEMENTED and live-verified unless noted:
 - **Roles**: terminal / app / unknown from verified classes. Agent
   inference skipped for apps (Chromium renders as Chromium, not
   "? unknown agent").
-- **Continuity** (`src/store.rs`, SQLite, schema v3): `meta`,
+- **Continuity** (`src/store.rs`, SQLite, schema v4): `meta`,
   `observations` (newest-100), `sessions`, `checkpoints` (manual +
   disappearance, 25/project + 500 global, 280-char notes),
-  `summaries` (input_hash PK). Hash-gated writes; systemd unit ships disabled.
+  `summaries` (input_hash PK), `notifications` (closed-vocab
+  kind/severity, session/project/agent columns, dedup key, 100-row
+  cap, column set pinned by test — no argv/env/transcript).
+  Hash-gated writes; systemd unit ships disabled.
+- **Notifications** (M5g slice, frozen): sync-derived per snapshot —
+  session appeared/vanished/stopped, assign completion (completion) /
+  failure (attention). Bounded transitions only, never per-process /
+  per-observation / per-tick. `state.json` carries unread rows (cap
+  20) + `unread_count` badge (attention/completion only;
+  informational lists, never badges). `pitwall notifications
+  [--unread]` lists; `notifications read <id>` marks exactly one row.
+  Core principle: **notification = "something happened"; AI summary
+  = "what does the situation mean?"** (see `docs/NEXT_SPRINT.md` §1).
 - **Resume** (`pitwall resume`): Level 1 focus live session (native
   `Toplevel.activate()`; CLI Lua-dispatch equivalent), Level 2 open
   terminal at validated dir (`xdg-terminal-exec --dir`). Strict validation,
@@ -43,8 +58,13 @@ All IMPLEMENTED and live-verified unless noted:
   hover-pause, click-expand); session rail newest-first (log-scaled
   duration bars, R/S/U history segments); hover-highlight + click-pin
   detail cards (deterministic detail, never AI-inferred per-bar);
-  actions Focus/Stop(SIGTERM-only)/Close/Resume on explicit clicks;
-  settings (Agent/Model/Toggle via `pitwall config`); RESUME history rows.
+   actions Focus/Stop(SIGTERM-only)/Close/Resume on explicit clicks;
+   settings (Agent/Model/Toggle via `pitwall config`); RESUME history rows.
+   Notification inbox: per-entry unread dot, inbox rows in the pinned
+   card (max 3 + `+N more`), group unread counts, header badge
+   (attention/completion only, hidden at zero). Listing/expanding
+   never marks read — only an explicit row click does. Header lives
+   outside the scroll Flickable (stable hitboxes).
 - **AI summary**: ephemeral bounded context (structured state + 10+10
   terminal lines where observable + derived events + checkpoints; 6
   sessions, 16KB cap) → user-configured agent (`opencode run --format
@@ -63,7 +83,9 @@ CLI surface (all explicit, no daemons): `status [--json]`, `snapshot
 agents), `agents`, `models [--agent]`, `summarize [--agent --model
 --dir --timeout --dry-run --clear]`, `assign --session-id --role
 --prompt [--model --timeout]` (validated foreground agent run, no
-persistence), `config get|set` (agent, model, summary_enabled only). Exit codes: 0 ok, 1 operational failure,
+persistence; completion/failure raises a notification),
+`notifications [--unread]` / `notifications read <id>`,
+`config get|set` (agent, model, summary_enabled only). Exit codes: 0 ok, 1 operational failure,
 2 usage error.
 
 ## 3. Architecture
@@ -104,24 +126,35 @@ ephemeral `status --json` output.
 | M5d | IMPLEMENTED | Summary cache + state v3 | `41aaa03` |
 | M5e | IMPLEMENTED | Pixel flag identity | `63a85e8` |
 | M5f | IMPLEMENTED | Timeline rail + interactions + polish | `09106f9`+`b193021`+`c57e6f9` |
-| M5g | IN PROGRESS | Hardening: semantic tree + assign backend done; further slices per dogfood | — |
+| M5g tree | IMPLEMENTED | Semantic tree + project grouping + assign backend | `f92037c`+`7aff577` |
+| M5g inbox | IMPLEMENTED (FROZEN) | Notification slice: table + sync events + CLI + state fields + panel inbox | `2d49bb4` |
+| Brand asset | IMPLEMENTED | `assets/pitwallpixelart.jpeg` (discovery art; flag stays UI identity) | `31184e3` |
 
-M5 UI is feature-frozen. 104 unit tests; `cargo fmt/clippy/test` gate.
+M5 UI is feature-frozen. 118 unit tests; `cargo fmt/clippy/test` gate.
+Next sprint plan: `docs/NEXT_SPRINT.md` (P0 hardening → P7 sharing).
+Everything beyond §2's list is PLANNED / FUTURE / DEFERRED.
 
 ## 5. Current Git State
 
-- HEAD `99e1d0d` on `main` (== origin/main at handover write; verify).
-- Tree: clean except 4 child-agent log files (theirs — see §11).
-- Rust: `cargo build/test` green historically; QML validated via live
-  shell + screenshots (headless ceiling: no physical click/tap).
+- Freeze series on `main`: `2d49bb4` (notification code freeze) →
+  `31184e3` (brand asset) → docs-freeze commit (this file; verify
+  with `git log --oneline -3`, then `== origin/main` after push).
+- Tree: only child-agent log files remain modified (theirs — do not
+  touch). PRE-owned code/docs/asset all committed.
+- Rust: gate green at freeze (`fmt`, `clippy --all-targets
+  --all-features -D warnings`, 118 tests). QML validated via live
+  shell + open-panel screenshot (headless ceiling: no physical
+  click/tap; CLI equivalents proven).
 
 ## 6. Current UI Model
 
-Collapsed: flag icon only. Expanded: `[flag] PITWALL [↻] [⚙]`; summary
+Collapsed: flag icon only. Expanded: `[flag] PITWALL [↻] [⚙]` (+ unread
+badge when attention/completion pending); summary
 ticker; rail (label `●/○/? kind · project[:branch] · N ▾/▴` + duration
-bar); pinned card (state/agent/window/project lines + actions);
-resumable history rows (muted, short-hash distinguishable); settings
-view swaps the body.
+bar); pinned card (state/agent/window/project lines + actions +
+inbox rows for that entry); resumable history rows (muted, short-hash distinguishable); settings
+view swaps the body. Unread dots mark entries with pending
+notifications; group headers carry unread counts.
 
 Display hierarchy (IMPLEMENTED wave M5g-1): tier captions
 (PITWALL-NATIVE → AGENTS → WORKSPACE → SYSTEM) with collapsible
@@ -215,8 +248,8 @@ detection as opencode/high). Intended future: same shape on demand.
 
 | Sev | Issue | Evidence | Status |
 |---|---|---|---|
-| P1 | Display hierarchy is recency-only, not semantic | wave-1 panel | M5g design item |
-| P2 | Same-project twins rail-identical | screenshot | M5g (title disambiguator) |
+| P1 | ~~Display hierarchy is recency-only, not semantic~~ | wave-1 panel | IMPLEMENTED (M5g tree, frozen) |
+| P2 | Same-project twins rail-identical | screenshot | OPEN (title disambiguator, next sprint) |
 | P2 | Summary freshness unsignaled (`isStale` watches snapshot) | code review | M5g |
 | P3 | `? shell` overstates; unknown-muted == resumable-muted | screenshot | M5g micro-fix |
 | P3 | Transient children nudge counts/activity | sampling | design TBD, not hotfix |
@@ -242,7 +275,9 @@ forever — except autonomy/safety bans, which stand.)
 
 ## 16. Public Roadmap
 
-M0–M5f built; M5 frozen; next M5g hardening; then M6 packaging/release.
+M0–M5f built; M5 + M5g slices (tree, assign, inbox) built and frozen;
+brand asset added. Next: `docs/NEXT_SPRINT.md` (P0 hardening → P7
+sharing), then M6 packaging/release.
 Directions: AI Workforce Design + community Recipes (see
 `docs/AI_WORKFORCE.md`, `docs/RECIPES.md`). Contribute: recipes,
 patterns, Omarchy integration, detection, docs, tests. MIT.
@@ -277,9 +312,10 @@ before claiming success; mailbox files are not receipt.
 
 ## 21. Next Step
 
-NEXT RECOMMENDED TASK: **M5g slice 1 — semantic display hierarchy**
-(categorize rail into Pitwall-native → agents → workspace/apps →
-system, recency within). WHY: the single biggest verified dogfood gap;
-purely presentational (no identity/model changes); unblocks twin
-disambiguation and unknown-color fixes as follow-ups. Runners-up: (2)
-summary-freshness signal; (3) manual click-through validation session.
+FROZEN for 2026-09-10 (user travelling). Next session starts at
+`docs/NEXT_SPRINT.md`: P0 = M5/M5g hardening and correctness on the
+frozen baseline (twins disambiguation, summary-freshness signal,
+unknown label/color are the known OPEN items in §13). Do NOT start
+P1+ without design review per roadmap governance. Runway is clean:
+code frozen (`2d49bb4`), asset in (`31184e3`), docs in this commit,
+only child-owned logs uncommitted (theirs).

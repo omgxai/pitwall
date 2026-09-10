@@ -32,11 +32,17 @@ Remaining M5 work is hardening only: correctness, reliability, privacy,
 performance, Omarchy compatibility, installation, edge cases,
 documentation. No visual redesigns, no new product surfaces.
 
-## Next: M5 hardening (M5g)
+## Next: hardening on the frozen baseline
 
-Correctness of detection/identity/grouping, Resume and process-control
-safety, summary quality, panel UX validation, performance, docs,
-clean-room install. No new features unless a genuine defect requires one.
+M5g slices are built and frozen: semantic project tree, `pitwall
+assign` workforce control, and the notification inbox (unread rows +
+attention/completion badge, explicit-read contract). Remaining work
+is hardening only (correctness, reliability, privacy, performance,
+Omarchy compatibility, installation, edge cases, documentation) plus
+the ranked plan in `docs/NEXT_SPRINT.md` (P0 hardening → P7
+sharing). No new features unless a genuine defect requires one, and
+nothing in `docs/NEXT_SPRINT.md` §2+ is implemented — those sections
+are planning, not status.
 
 ## Direction: Pitwall AI Workforce Design
 
