@@ -1,4 +1,5 @@
 # Pitwall
+<img width="1254" height="1254" alt="pitwallpixelart" src="https://github.com/user-attachments/assets/109c01ab-08f8-4670-b03d-bc1a5f8a1a9d" />
 
 **AI workspace awareness for developers.**
 
