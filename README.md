@@ -1,7 +1,10 @@
 # Pitwall
 
 <div align="center">
-  <img width="256" height="256" alt="Pitwall pixel art" src="assets/pitwallpixelart.jpeg" />
+  <br />
+  <img width="512" height="512" alt="Pitwall pixel art" src="assets/pitwallpixelart.jpeg" />
+  <br />
+  <br />
 </div>
 
 **Omarchy's workspace awareness layer for AI-assisted development.**
