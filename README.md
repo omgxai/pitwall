@@ -1,5 +1,8 @@
 # Pitwall
-https://github.com/omgxai/pitwall/blob/main/assets/pitwallpixelart.jpeg
+
+<div align="center">
+  <img width="256" height="256" alt="Pitwall pixel art" src="assets/pitwallpixelart.jpeg" />
+</div>
 
 **Omarchy's workspace awareness layer for AI-assisted development.**
 
