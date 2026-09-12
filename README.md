@@ -1,4 +1,5 @@
 # Pitwall
+https://github.com/omgxai/pitwall/blob/main/assets/pitwallpixelart.jpeg
 
 **Omarchy's workspace awareness layer for AI-assisted development.**
 
