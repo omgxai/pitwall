@@ -179,12 +179,12 @@ pub struct Event {
 /// question surfaces. This type contains only bounded, already-observed
 /// Pitwall facts. It deliberately has no process command lines, environment,
 /// credentials, arbitrary file contents, or terminal transcript text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SummaryContext {
-    pub snapshot: WorkspaceSnapshot,
-    pub events: Vec<Event>,
-    pub checkpoints: Vec<Checkpoint>,
-    pub notifications: Vec<crate::store::Notification>,
+    snapshot: WorkspaceSnapshot,
+    events: Vec<Event>,
+    checkpoints: Vec<Checkpoint>,
+    notifications: Vec<crate::store::Notification>,
 }
 
 impl SummaryContext {
