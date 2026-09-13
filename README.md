@@ -108,6 +108,10 @@ cards; RESUME history rows.
 - **Master/Child workforce awareness.** Pitwall detects and displays
   Master + child agent sessions with titles, evidence, and confidence
   (see [docs/AI_WORKFORCE.md](docs/AI_WORKFORCE.md)).
+- **Live observation.** The optional user systemd timer runs a bounded
+  read-only snapshot every 30 seconds. Hash-gated persistence avoids writes
+  when nothing changed, while the panel watches `state.json` and updates as
+  soon as a new artifact is published. Manual refresh remains available.
 - **Settings + refresh.** `~/.config/pitwall/config` (0600:
   agent/model/summary_enabled) via `pitwall config get|set`, echoed
   into `state.json` for QML. Refresh = snapshot. Generate = explicit
@@ -225,7 +229,9 @@ temporary remote summary sharing.
 ## Install
 
 No installer yet — it arrives with M6 packaging. `packaging/install.sh`
-is a stub that says so (verified). Target flow:
+is a stub that says so (verified). The shipped user units are optional and
+disabled by default; enable them only after installing the binary and units.
+Target flow:
 
 ```bash
 git clone <repo-url> ~/Projects/pitwall

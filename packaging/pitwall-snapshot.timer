@@ -1,13 +1,13 @@
 [Unit]
-Description=Pitwall periodic workspace snapshot (every 5 minutes)
+Description=Pitwall periodic workspace snapshot (every 30 seconds)
 Documentation=https://github.com/omgxai/pitwall
-# M2: conservative cadence. Writes are hash-gated (no-op when unchanged),
-# so idle ticks cost ~10ms CPU and zero disk writes. NOT enabled by
-# default in M2.
+# The collector is read-only and persistence is hash-gated: unchanged ticks
+# publish no database observation and no state-file content change. This keeps
+# the panel responsive to session lifecycle changes without a resident daemon.
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
+OnBootSec=30s
+OnUnitActiveSec=30s
 Persistent=false
 
 [Install]
