@@ -28,6 +28,8 @@ all detection lives in the Rust daemon/CLI, never in QML.
   nothing while closed, pulse only while a session runs.
 - Focus uses `Toplevel.activate()` matched by app-id (+ exact title to
   break ties); refuses ambiguous/gone targets. Never constructs commands.
+  Targeting failures stay visible in the open panel as a short attention
+  message; successful explicit actions use the same compact feedback line.
   (`hyprctl dispatch` is unusable from shell widgets in this environment —
   its Lua shorthand rejects multi-token calls; native activation is also
   the first-party mechanism.)

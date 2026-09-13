@@ -27,6 +27,8 @@ Panel {
   property bool showSettings: false
   property bool summaryExpanded: false
   property bool generating: false
+  property string feedbackText: ""
+  property bool feedbackAttention: false
   // Local settings mirror (initialized from state echo, updated on change).
   property string cfgAgent: "opencode"
   property string cfgModel: ""
@@ -92,6 +94,12 @@ Panel {
     return "Pitwall"
   }
 
+  function announce(text, attention) {
+    root.feedbackText = String(text || "")
+    root.feedbackAttention = !!attention
+    feedbackTimer.restart()
+  }
+
   // --- native focus/close (M4 mechanism, unchanged semantics) ---
   function findToplevel(s) {
     var w = (s && s.window) || null
@@ -123,9 +131,11 @@ Panel {
     var target = findToplevel(s)
     if (!target) {
       console.warn("pitwall", "Focus target gone or ambiguous")
+      root.announce("Workspace target is no longer available.", true)
       return
     }
     target.activate()
+    root.announce("Focused " + stateReader.sessionLabel(s) + ".", false)
     root.close()
   }
 
@@ -133,9 +143,11 @@ Panel {
     var target = findToplevel(s)
     if (!target) {
       console.warn("pitwall", "Close target gone or ambiguous")
+      root.announce("Could not identify the original window.", true)
       return
     }
     target.close()
+    root.announce("Closed " + stateReader.sessionLabel(s) + ".", false)
     root.close()
   }
 
@@ -153,10 +165,16 @@ Panel {
     var sid = String(sessionId || "")
     if (!/^sess_[0-9a-f]{16}$/.test(sid)) {
       console.warn("pitwall", "Refusing resume with invalid session id", sid)
+      root.announce("Could not resume: invalid session.", true)
       return
     }
     runFixed(["pitwall", "resume", "--session-id", sid], function(code) {
-      if (code !== 0) console.warn("pitwall", "resume exited", code, "for", sid)
+      if (code !== 0) {
+        console.warn("pitwall", "resume exited", code, "for", sid)
+        root.announce("Resume failed. The workspace target may be gone.", true)
+      } else {
+        root.announce("Resume started.", false)
+      }
     })
   }
 
@@ -167,10 +185,16 @@ Panel {
     var pid = Number(s && s.root_pid)
     if (!isFinite(pid) || pid <= 1 || Math.floor(pid) !== pid) {
       console.warn("pitwall", "Refusing stop with invalid pid")
+      root.announce("Could not stop: workspace target is unavailable.", true)
       return
     }
     runFixed(["/usr/bin/kill", "-s", "TERM", String(pid)], function(code) {
-      if (code !== 0) console.warn("pitwall", "stop exited", code, "for pid", pid)
+      if (code !== 0) {
+        console.warn("pitwall", "stop exited", code, "for pid", pid)
+        root.announce("Stop failed. The session may have already ended.", true)
+      } else {
+        root.announce("Stop requested.", false)
+      }
       stateReader.refresh()
     })
   }
@@ -223,6 +247,13 @@ Panel {
     running: root.opened
     repeat: true
     onTriggered: root.nowMs = Date.now()
+  }
+
+  Timer {
+    id: feedbackTimer
+    interval: 4500
+    repeat: false
+    onTriggered: root.feedbackText = ""
   }
 
   // One-shot action runner: fixed argv, exit-visible, no shell.
@@ -284,7 +315,12 @@ Panel {
     onExited: function(code) {
       root.refreshing = false
       refreshButton.rotation = 0
-      if (code !== 0) console.warn("pitwall", "snapshot refresh exited", code)
+      if (code !== 0) {
+        console.warn("pitwall", "snapshot refresh exited", code)
+        root.announce("Refresh failed. Showing the last known workspace state.", true)
+      } else {
+        root.announce("Workspace state refreshed.", false)
+      }
       stateReader.refresh()
     }
   }
@@ -295,7 +331,12 @@ Panel {
     stderr: StdioCollector {}
     onExited: function(code) {
       root.generating = false
-      if (code !== 0) console.warn("pitwall", "summarize exited", code)
+      if (code !== 0) {
+        console.warn("pitwall", "summarize exited", code)
+        root.announce("Summary unavailable. Your workspace was not changed.", true)
+      } else {
+        root.announce("Summary updated.", false)
+      }
       stateReader.refresh()
     }
   }
@@ -502,10 +543,24 @@ Panel {
           }
         }
 
-        Column {
-          id: railColumn
+           Column {
+             id: railColumn
           width: railFlick.width
-          spacing: Style.space(10)
+             spacing: Style.space(10)
+
+             Text {
+               visible: root.feedbackText !== ""
+               width: parent.width
+               textFormat: Text.PlainText
+               text: root.feedbackText
+               color: root.feedbackAttention ? Color.urgent : Color.muted
+               font.family: Style.font.family
+               font.pixelSize: Style.font.caption
+               wrapMode: Text.Wrap
+               maximumLineCount: 2
+               elide: Text.ElideRight
+               renderType: Text.NativeRendering
+             }
 
 
           // ---- settings view (replaces rail while open) ----
