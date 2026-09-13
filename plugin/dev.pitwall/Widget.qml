@@ -29,7 +29,7 @@ Panel {
   property bool generating: false
   property string feedbackText: ""
   property bool feedbackAttention: false
-  property int tickerIndex: 0
+  readonly property real tickerSpeedPxPerSec: 90
   // The installer places the binary in the user-local bin directory. Keep a
   // PATH fallback for development environments that provide another install.
   readonly property string pitwallBinary: {
@@ -670,9 +670,10 @@ Panel {
               }
 
               Item {
+                id: tickerViewport
                 visible: root.summaryText() !== ""
                 width: parent.width
-                height: summaryBody.implicitHeight + Style.space(10)
+                height: root.summaryExpanded ? expandedSummary.implicitHeight + Style.space(10) : tickerMeasure.implicitHeight + Style.space(10)
                 clip: true
 
                 Rectangle {
@@ -684,7 +685,51 @@ Panel {
                 }
 
                 Text {
-                  id: summaryBody
+                  id: tickerMeasure
+                  visible: false
+                  textFormat: Text.PlainText
+                  text: root.summaryShort() + "  ·  "
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                  onTextChanged: tickerTrack.x = 0
+                }
+
+                Item {
+                  id: tickerTrack
+                  visible: !root.summaryExpanded
+                  x: 0
+                  y: Style.space(5)
+                  width: tickerMeasure.implicitWidth * tickerRepeater.count
+                  height: tickerMeasure.implicitHeight
+
+                  Repeater {
+                    id: tickerRepeater
+                    model: Math.max(2, Math.ceil(tickerViewport.width / Math.max(1, tickerMeasure.implicitWidth)) + 2)
+                    delegate: Text {
+                      width: tickerMeasure.implicitWidth
+                      height: tickerMeasure.implicitHeight
+                      textFormat: Text.PlainText
+                      text: tickerMeasure.text
+                      color: Color.foreground
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                      renderType: Text.NativeRendering
+                    }
+                  }
+
+                  NumberAnimation on x {
+                    id: tickerAnimation
+                    to: -tickerMeasure.implicitWidth
+                    duration: Math.max(700, Math.round(tickerMeasure.implicitWidth / root.tickerSpeedPxPerSec * 1000))
+                    loops: Animation.Infinite
+                    running: root.opened && !root.summaryExpanded && !tickHover.hovered
+                    easing.type: Easing.Linear
+                  }
+                }
+
+                Text {
+                  id: expandedSummary
+                  visible: root.summaryExpanded
                   x: Style.space(5)
                   y: Style.space(5)
                   width: parent.width - Style.space(10)
@@ -692,61 +737,24 @@ Panel {
                   wrapMode: root.summaryExpanded ? Text.Wrap : Text.NoWrap
                   elide: root.summaryExpanded ? Text.ElideNone : Text.ElideRight
                   maximumLineCount: root.summaryExpanded ? 6 : 1
-                  text: root.tickerText()
+                  text: root.summaryShort()
                   color: Color.foreground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                   renderType: Text.NativeRendering
 
-                  // Slow horizontal ping-pong only when overflowing, panel
-                  // open, and not hovered. Rests readable at both ends so a
-                  // still glance usually catches text (no blank marathons).
-                  // No vertical motion, no speed above ~30px/s.
-                  property bool overflow: implicitWidth > width + 2
-                  property bool drift: overflow && !root.summaryExpanded && root.opened && !tickHover.hovered
-                  property int driftSpan: Math.max(0, summaryBody.implicitWidth - summaryBody.width)
-                  property int driftMs: Math.max(4000, driftSpan * 33)
-                  SequentialAnimation on x {
-                    id: tickAnim
-                    running: summaryBody.drift
-                    loops: Animation.Infinite
-                    PauseAnimation { duration: 2500 }
-                    NumberAnimation {
-                      from: 0
-                      to: -summaryBody.driftSpan
-                      duration: summaryBody.driftMs
-                      easing.type: Easing.InOutQuad
-                    }
-                    PauseAnimation { duration: 2500 }
-                    NumberAnimation {
-                      from: -summaryBody.driftSpan
-                      to: 0
-                      duration: summaryBody.driftMs
-                      easing.type: Easing.InOutQuad
-                    }
-                  }
-                  onDriftChanged: if (!drift) x = 0
-                  onTextChanged: x = 0
-
-                  HoverHandler {
-                    id: tickHover
-                  }
-
-                  MouseArea {
-                    anchors.fill: parent
-                    acceptedButtons: Qt.LeftButton
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.summaryExpanded = !root.summaryExpanded
-                  }
                 }
-              }
 
-              Timer {
-                interval: 7000
-                repeat: true
-                running: root.opened && !root.summaryExpanded && !tickHover.hovered
-                  && root.summaryItems().length > 1
-                onTriggered: root.tickerIndex = (root.tickerIndex + 1) % root.summaryItems().length
+                HoverHandler {
+                  id: tickHover
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  acceptedButtons: Qt.LeftButton
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.summaryExpanded = !root.summaryExpanded
+                }
               }
 
               // Needs-attention line: only when the cached summary
@@ -1129,9 +1137,8 @@ Panel {
     return "Resume: open terminal at " + dir
   }
 
-  // Ticker shows a compact slice of the cached summary (word-bounded
-  // ~160 chars + continuation mark). Full text opens on click. Never
-  // the whole paragraph: the rail is an instrument, not a reader.
+  // The viewport clips the full bounded brief; the marquee track carries the
+  // complete text and a separator so the loop never exposes an empty gap.
   function summaryText() {
     var full = summaryShort()
     if (full === "") return ""
@@ -1146,24 +1153,6 @@ Panel {
     if (!summary) return ""
     if (summary.status === "error") return ""
     return String(summary.text || "").replace(/\s+/g, " ").trim()
-  }
-
-  function summaryItems() {
-    var text = summaryShort()
-    if (text === "") return []
-    var parts = text.split(/(?:\n+|[.!?]\s+)/)
-    var out = []
-    for (var i = 0; i < parts.length; i++) {
-      var item = String(parts[i] || "").trim()
-      if (item !== "") out.push(item)
-    }
-    return out.length > 0 ? out : [text]
-  }
-
-  function tickerText() {
-    var items = summaryItems()
-    if (items.length === 0) return ""
-    return items[Math.min(tickerIndex, items.length - 1)]
   }
 
   // "Needs attention" line, only when the cached summary explicitly
