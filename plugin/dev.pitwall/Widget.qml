@@ -493,6 +493,16 @@ Panel {
                 font.bold: true
                 renderType: Text.NativeRendering
               }
+
+              Text {
+                textFormat: Text.PlainText
+                text: " \u00b7 " + stateReader.sessionCount
+                color: Color.muted
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+                renderType: Text.NativeRendering
+              }
             }
           }
 
@@ -569,17 +579,7 @@ Panel {
                renderType: Text.NativeRendering
              }
 
-             Text {
-               textFormat: Text.PlainText
-               text: " \u00b7 " + stateReader.sessionCount
-               color: Color.muted
-               font.family: Style.font.family
-               font.pixelSize: Style.font.bodySmall
-               renderType: Text.NativeRendering
-             }
-
-
-          // ---- settings view (replaces rail while open) ----
+           // ---- settings view (replaces rail while open) ----
           Column {
             visible: root.showSettings
             width: parent.width
@@ -673,7 +673,7 @@ Panel {
                 id: tickerViewport
                 visible: root.summaryText() !== ""
                 width: parent.width
-                height: root.summaryExpanded ? expandedSummary.implicitHeight + Style.space(10) : tickerMeasure.implicitHeight + Style.space(10)
+                height: root.summaryExpanded ? expandedSummary.implicitHeight + Style.space(10) : marqueeText.implicitHeight + Style.space(10)
                 clip: true
 
                 Rectangle {
@@ -715,8 +715,8 @@ Panel {
                     to: -marqueeText.implicitWidth
                     duration: Math.max(700, Math.round((tickerViewport.width + marqueeText.implicitWidth) / root.tickerSpeedPxPerSec * 1000))
                     loops: Animation.Infinite
-                    running: root.opened && tickerViewport.visible
-                    paused: root.summaryExpanded || tickHover.hovered
+                    running: tickerViewport.visible
+                    paused: tickerAnimation.running && (!root.opened || root.summaryExpanded || tickHover.hovered)
                     easing.type: Easing.Linear
                   }
                 }
