@@ -195,9 +195,9 @@ pub fn run_agent(argv: &[String], timeout: Duration) -> Result<String, String> {
 }
 
 /// Extract human summary text from `opencode run --format json` output.
-/// Scans JSON-lines for text-bearing fields; falls back to trimmed raw
-/// output (also truncated). Never executes, never chains tool calls —
-/// only text is returned.
+/// Scans JSON-lines for text-bearing fields and accepts trimmed plain-text
+/// lines. Returns empty when no usable text remains, never restoring ignored
+/// events as raw output. The result is truncated to [`MAX_SUMMARY_CHARS`].
 pub fn extract_summary_text(raw: &str) -> String {
     let mut parts = Vec::new();
     for line in raw.lines() {
@@ -221,12 +221,7 @@ pub fn extract_summary_text(raw: &str) -> String {
         }
         parts.push(line.to_string());
     }
-    let joined = if parts.is_empty() {
-        raw.trim().to_string()
-    } else {
-        parts.join("\n")
-    };
-    joined.chars().take(MAX_SUMMARY_CHARS).collect()
+    parts.join("\n").chars().take(MAX_SUMMARY_CHARS).collect()
 }
 
 /// Minimal JSON string-field extractor (no new deps): finds
@@ -421,7 +416,23 @@ mod tests {
     }
 
     #[test]
-    fn raw_output_falls_back_and_truncates() {
+    fn json_events_without_text_return_empty() {
+        for raw in [
+            "{\"type\":\"tool\",\"name\":\"bash\",\"input\":\"tool payload\"}",
+            "{\"type\":\"meta\",\"tokens\":42}",
+            concat!(
+                "{\"type\":\"tool\",\"input\":\"tool payload\"}\n",
+                "{\"type\":\"meta\",\"tokens\":42}\n",
+                "{\"type\":\"text\",\"text\":\"  \"}\n",
+            ),
+            "{\"type\":\"text\",\"text\":\"\"}",
+        ] {
+            assert_eq!(extract_summary_text(raw), "", "input: {raw}");
+        }
+    }
+
+    #[test]
+    fn plain_text_output_is_preserved_and_truncated() {
         let raw = "plain answer here";
         assert_eq!(extract_summary_text(raw), "plain answer here");
         let big = "x".repeat(MAX_SUMMARY_CHARS + 500);
