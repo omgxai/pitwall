@@ -28,6 +28,8 @@
 - **M5g assign backend + polish — workforce control**: COMPLETE and pushed.
 - **PRE established**: Race Engineer online 2026-09-10; coordination
   files created (`agent_master.md`, child stories, `.agents/`).
+- **M7 — SummaryContext**: implemented and pushed (`cef1b95`, privacy fix
+  `313a42e`); summary hashing now consumes one bounded structured context.
 
 ## Completed work
 

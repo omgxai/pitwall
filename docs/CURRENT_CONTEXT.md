@@ -283,6 +283,9 @@ passes; fresh-machine Omarchy verification remains a follow-up limitation.
 M7 summary freshness now rejects mismatched cached text, and the ticker
 rotates bounded summary sentences. Chat and external channels remain
 deferred because the current runner is synchronous summary-only execution.
+The shared `SummaryContext` is now the deterministic privacy boundary for
+sessions, events, checkpoints, and scrubbed notification facts; terminal
+text is still ephemeral and excluded from its hash.
 Directions: AI Workforce Design + community Recipes (see
 `docs/AI_WORKFORCE.md`, `docs/RECIPES.md`). Contribute: recipes,
 patterns, Omarchy integration, detection, docs, tests. MIT.

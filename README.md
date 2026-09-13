@@ -242,7 +242,10 @@ temporary remote summary sharing.
 M7 currently hardens summary freshness and rotates bounded summary sentences
 in the ticker. Interactive Pitwall Chat and external communication channels
 are not implemented; the configured agent runner remains an explicit,
-foreground summary operation.
+foreground summary operation. Summary generation now passes through one
+bounded `SummaryContext` containing observed sessions, derived events,
+checkpoints, and scrubbed notification facts; terminal text remains confined
+to the existing ephemeral summary document path.
 
 ## Branding
 
