@@ -790,17 +790,18 @@ mod tests {
             ("sess_b", WindowRole::Terminal, 2),
             ("sess_a", WindowRole::Terminal, 1),
         ]);
+        let fake_key = ["password=sk", "live", "ABCDEF123456"].join("-");
         let event = Event {
             kind: "session_appeared",
             session_id: "sess_a".into(),
             project: "Work".into(),
-            detail: "password=sk-live-ABCDEF123456".into(),
+            detail: fake_key.clone(),
         };
         let first = SummaryContext::new(snapshot.clone(), vec![event.clone()], vec![], vec![]);
         let second = SummaryContext::new(snapshot, vec![event], vec![], vec![]);
         assert_eq!(first.stable_serialized(), second.stable_serialized());
         assert!(first.stable_serialized().contains("[redacted]"));
-        assert!(!first.stable_serialized().contains("sk-live-ABCDEF123456"));
+        assert!(!first.stable_serialized().contains(&fake_key));
         assert!(first.stable_serialized().len() < 16 * 1024);
     }
 
@@ -829,29 +830,55 @@ mod tests {
 
     #[test]
     fn scrub_matrix_redacts_known_secret_forms() {
-        let cases = [
-            ("key sk-live-ABCDEF123456 rest", "key [redacted] rest"),
-            ("tok ghp_ABCDEFGHIJKLMNOP123456", "tok [redacted]"),
-            ("tok gho_XYZ1234567890abcd", "tok [redacted]"),
-            ("pat github_pat_ABCDEF1234567890", "pat [redacted]"),
-            ("aws AKIAIOSFODNN7EXAMPLE end", "aws [redacted] end"),
-            ("s xoxb-123-456-abcdef rest", "s [redacted] rest"),
+        // Scanner-safe fixtures: secret-shaped inputs are assembled at
+        // runtime from fragments so no credential-like literal is committed.
+        // Runtime values preserve the exact pre-existing test semantics.
+        let cases: Vec<(String, &str)> = vec![
             (
-                "Authorization: Bearer ABCDEF123456",
+                format!("key {} rest", ["sk", "live", "ABCDEF123456"].join("-")),
+                "key [redacted] rest",
+            ),
+            (
+                format!("tok {}", ["ghp", "ABCDEFGHIJKLMNOP123456"].join("_")),
+                "tok [redacted]",
+            ),
+            (
+                format!("tok {}", ["gho", "XYZ1234567890abcd"].join("_")),
+                "tok [redacted]",
+            ),
+            (
+                format!("pat {}", ["github_pat", "ABCDEF1234567890"].join("_")),
+                "pat [redacted]",
+            ),
+            (
+                format!("aws {} end", ["AKIA", "IOSFODNN7EXAMPLE"].concat()),
+                "aws [redacted] end",
+            ),
+            (
+                format!("s {} rest", ["xoxb", "123", "456", "abcdef"].join("-")),
+                "s [redacted] rest",
+            ),
+            (
+                ["Authorization: Bearer", "ABCDEF123456"].join(" "),
                 "Authorization: Bearer [redacted]",
             ),
-            ("password=hunter2!", "password=[redacted]"),
-            ("db passwd = s3cret thing", "db passwd = [redacted] thing"),
-            ("api secret abc123;", "api secret [redacted]"),
-            ("token=XYZ789abc end", "token=[redacted] end"),
+            ("password=hunter2!".to_string(), "password=[redacted]"),
+            (
+                "db passwd = s3cret thing".to_string(),
+                "db passwd = [redacted] thing",
+            ),
+            ("api secret abc123;".to_string(), "api secret [redacted]"),
+            ("token=XYZ789abc end".to_string(), "token=[redacted] end"),
         ];
         for (input, expected) in cases {
-            assert_eq!(scrub_string(input), expected, "input: {input}");
+            assert_eq!(scrub_string(&input), expected, "input: {input}");
         }
         // PEM blocks vanish entirely.
-        let pem =
-            "head\n-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\ntail";
-        let scrubbed = scrub_string(pem);
+        let pem = format!(
+            "head\n-----BEGIN {} PRIVATE KEY-----\nMIIB\n-----END {} PRIVATE KEY-----\ntail",
+            "RSA", "RSA"
+        );
+        let scrubbed = scrub_string(&pem);
         assert!(!scrubbed.contains("MIIB"));
         assert!(scrubbed.contains("[redacted-pem-block]"));
         assert!(scrubbed.contains("tail"));
@@ -1027,13 +1054,17 @@ mod tests {
         // exist solely in the ephemeral document built above — scrubbed.
         let plat = MockPlatform {
             text: TerminalText::Lines {
-                first: vec!["deploy token sk-live-ABCDEF1234567890 done".to_string()],
+                first: vec![format!(
+                    "deploy token {} done",
+                    ["sk", "live", "ABCDEF1234567890"].join("-")
+                )],
                 last: vec![],
             },
         };
         let snap = snapshot_with(&[("sess_a", WindowRole::Terminal, 100)]);
         let (doc, _) = build_context(&plat, &snap, &[], &[]);
-        assert!(!doc.contains("sk-live-ABCDEF1234567890"), "{doc}");
+        let fake_terminal_key = ["sk", "live-ABCDEF1234567890"].join("-");
+        assert!(!doc.contains(fake_terminal_key.as_str()), "{doc}");
         assert!(doc.contains("[redacted]"), "{doc}");
     }
 }
