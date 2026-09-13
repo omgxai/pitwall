@@ -29,7 +29,22 @@ Panel {
   property bool generating: false
   property string feedbackText: ""
   property bool feedbackAttention: false
+  // Scroll_Rate: the one speed constant. Every pass duration derives from it
+  // and measured geometry — never from the summary's character count (3.6).
   readonly property real tickerSpeedPxPerSec: 180
+  // The pass offset lives on root, not on the track, because the panel can
+  // tear its content down while a pass is paused. `paused` preserves progress
+  // only while the item lives; the externalised offset survives teardown, so a
+  // reopened panel continues the same pass from where it stopped (4.2, 4.5).
+  // NaN means "no pass in flight yet": the first pass enters from the right.
+  property real tickerOffset: NaN
+  // Travel distance over Scroll_Rate, in milliseconds. No lower clamp: a floor
+  // would make short briefs scroll slower than long ones (3.1, 3.3, 3.6).
+  // Math.max(1, …) is not a speed floor, it only keeps the duration off zero,
+  // where a NumberAnimation snaps to `to` instead of scrolling.
+  function tickerDurationMs(fromX, contentW) {
+    return Math.max(1, (fromX + contentW) / root.tickerSpeedPxPerSec * 1000)
+  }
   // The installer places the binary in the user-local bin directory. Keep a
   // PATH fallback for development environments that provide another install.
   readonly property string pitwallBinary: {
@@ -639,171 +654,307 @@ Panel {
             width: parent.width
             spacing: Style.space(10)
 
-            // ---- AI summary ticker ----
+            // ---- AI brief card (one bounded surface) ----
             Column {
+             id: briefSurface
              visible: root.cfgSummary
              width: parent.width
              spacing: Style.space(4)
 
-              Row {
-                width: parent.width
-                spacing: Style.space(4)
-
-                Text {
-                  textFormat: Text.PlainText
-                  text: "AI BRIEF"
-                  color: Qt.darker(Color.foreground, 1.35)
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                  renderType: Text.NativeRendering
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  text: root.summary && root.summary.status === "ready" ? "●" : "○"
-                  color: root.summary && root.summary.status === "ready" ? Color.accent : Color.muted
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  renderType: Text.NativeRendering
-                }
+              // Hover pause covers the whole AI_Brief_Surface — caption row,
+              // ticker card and status line — not just the text row (4.1).
+              // A HoverHandler is not an Item, so Column does not position it.
+              HoverHandler {
+                id: briefHover
               }
 
-              Item {
-                id: tickerViewport
-                visible: root.summaryText() !== ""
+              // One bounded card carries the whole AI_Brief_Surface: caption
+              // row, single-line ticker, pass-progress underline and the
+              // status line live inside this one border, so the brief never
+              // reads as stacked lines of equal weight (6.5, 7.3). The accent
+              // border is what marks the brief out from the rail below it.
+              Rectangle {
+                id: briefCard
                 width: parent.width
-                height: root.summaryExpanded ? expandedSummary.implicitHeight + Style.space(10) : marqueeText.implicitHeight + Style.space(10)
-                clip: true
+                height: briefCardColumn.implicitHeight + Style.space(12)
+                radius: Style.space(3)
+                color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.045)
+                border.width: 1
+                border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.35)
 
-                Rectangle {
-                  anchors.fill: parent
-                  color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.045)
-                  border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.16)
-                  border.width: 1
-                  radius: Style.space(3)
-                }
+                Column {
+                  id: briefCardColumn
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.leftMargin: Style.space(6)
+                  anchors.rightMargin: Style.space(6)
+                  anchors.topMargin: Style.space(6)
+                  spacing: Style.space(4)
 
-                Item {
-                  id: tickerTrack
-                  visible: !root.summaryExpanded
-                  x: tickerViewport.width
-                  y: Style.space(5)
-                  width: marqueeText.implicitWidth
-                  height: marqueeText.implicitHeight
+                  // (a) caption row: flag mark, label, current indicator.
+                  // ● means the cached brief is current, ○ that it is not
+                  // (6.1) — the word beside it in the status line carries the
+                  // meaning, the glyph never carries it alone.
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(4)
 
-                  Text {
-                    id: marqueeText
-                    textFormat: Text.PlainText
-                    text: root.summaryShort() + "  ·  "
-                    width: implicitWidth
-                    height: implicitHeight
-                    elide: Text.ElideNone
-                    color: Color.foreground
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.bodySmall
-                    renderType: Text.NativeRendering
-                    onTextChanged: {
-                      tickerTrack.x = tickerViewport.width
-                      tickerAnimation.restart()
+                    Image {
+                      width: Style.space(11)
+                      height: Style.space(11)
+                      anchors.verticalCenter: parent.verticalCenter
+                      source: "flag.svg"
+                      fillMode: Image.PreserveAspectFit
+                      smooth: false
+                      mipmap: false
+                      visible: status !== Image.Error
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      text: "AI BRIEF"
+                      color: Color.muted
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                      renderType: Text.NativeRendering
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      text: root.summary && root.summary.status === "ready" ? "●" : "○"
+                      color: root.summary && root.summary.status === "ready" ? Color.accent : Color.muted
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      renderType: Text.NativeRendering
                     }
                   }
 
-                  NumberAnimation on x {
-                    id: tickerAnimation
-                    from: tickerViewport.width
-                    to: -marqueeText.implicitWidth
-                    duration: Math.max(700, Math.round((tickerViewport.width + marqueeText.implicitWidth) / root.tickerSpeedPxPerSec * 1000))
-                    loops: Animation.Infinite
-                    running: tickerViewport.visible
-                    paused: tickerAnimation.running && (!root.opened || root.summaryExpanded || tickHover.hovered)
-                    easing.type: Easing.Linear
+                  // (b) the single-line ticker viewport plus its expand
+                  // affordance. `visible` keys on the root function, never on
+                  // a child's `visible`: QQuickItem.visible reads *effective*
+                  // visibility, so a parent keyed on a child would latch off
+                  // and never come back.
+                  Item {
+                    id: tickerLine
+                    visible: root.summaryShort() !== ""
+                    width: parent.width
+                    height: tickerViewport.height
+
+                    Item {
+                      id: tickerViewport
+                      visible: root.summaryShort() !== ""
+                      anchors.left: parent.left
+                      anchors.right: expandGlyph.left
+                      anchors.rightMargin: Style.space(4)
+                      height: root.summaryExpanded ? expandedSummary.implicitHeight + Style.space(10) : marqueeText.implicitHeight + Style.space(10)
+                      clip: true
+                      // Recompute the pass duration from the new travel distance
+                      // (3.4). Restarting keeps the current x, so a resize does not
+                      // throw away where the brief had got to.
+                      onWidthChanged: if (tickerPass && tickerViewport.visible) tickerPass.restart()
+
+                      Item {
+                        id: tickerTrack
+                        visible: !root.summaryExpanded
+                        y: Style.space(5)
+                        // Measured natural width of the complete brief (3.2). The
+                        // viewport clips; travel exposes the tail (1.1, 1.3).
+                        width: marqueeText.implicitWidth
+                        height: marqueeText.implicitHeight
+
+                        // Start a fresh pass with the first character at the right
+                        // edge (2.2, 2.4, 5.1). `from` reads tickerTrack.x, so x has
+                        // to be moved before the restart, not just the mirror.
+                        function startPassFromRightEdge() {
+                          root.tickerOffset = tickerViewport.width
+                          tickerTrack.x = tickerViewport.width
+                          if (tickerViewport.visible)
+                            tickerPass.restart()
+                        }
+
+                        // Imperative, not a binding on x: the animation must be free
+                        // to drive x, and a binding would also fight onXChanged.
+                        Component.onCompleted: {
+                          x = isNaN(root.tickerOffset) ? tickerViewport.width : root.tickerOffset
+                          // Re-arm explicitly so `from` is read after x is restored,
+                          // whatever order completion and the `running` binding run in.
+                          if (tickerViewport.visible)
+                            tickerPass.restart()
+                        }
+                        // Cheap mirror, no timer. Nothing binds x to tickerOffset, so
+                        // this cannot cycle: the write is one-way, track -> root.
+                        onXChanged: root.tickerOffset = x
+
+                        Text {
+                          id: marqueeText
+                          textFormat: Text.PlainText
+                          text: root.summaryShort()
+                          width: implicitWidth
+                          height: implicitHeight
+                          elide: Text.ElideNone
+                          color: Color.foreground
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.bodySmall
+                          renderType: Text.NativeRendering
+                          // A new brief is read from its start, never from its middle
+                          // (5.1). QQuickText lays out before it emits textChanged,
+                          // so implicitWidth is already the new measured width here
+                          // and the restart picks up the new duration (5.2, 5.3).
+                          onTextChanged: tickerTrack.startPassFromRightEdge()
+                        }
+
+                        // One pass per animation run, restarted explicitly, rather
+                        // than loops: Animation.Infinite. `from`/`to`/`duration` are
+                        // baked in when a run starts and ignored until it restarts,
+                        // so an infinitely looping run would keep replaying the
+                        // geometry of its first pass: it could neither resume from a
+                        // held offset (4.5) nor recompute duration after a resize
+                        // (3.4). An explicit restart re-reads all three.
+                        NumberAnimation on x {
+                          id: tickerPass
+                          from: tickerTrack.x                     // resumes an interrupted pass (4.5)
+                          to: -marqueeText.implicitWidth          // last character clears the left edge (2.3)
+                          duration: root.tickerDurationMs(tickerTrack.x, marqueeText.implicitWidth)
+                          easing.type: Easing.Linear              // (3.5)
+                          running: tickerViewport.visible         // empty brief hides the viewport and stops it (5.4)
+                          // Gated on `running` because Qt refuses setPaused() on a
+                          // stopped animation; the gate also re-applies the pause
+                          // after any restart(), which clears it (4.1, 4.3, 4.4).
+                          paused: tickerPass.running && (!root.opened || root.summaryExpanded || briefHover.hovered)
+                          onFinished: tickerTrack.startPassFromRightEdge()
+                        }
+                      }
+
+                      Text {
+                        id: expandedSummary
+                        visible: root.summaryExpanded
+                        x: Style.space(5)
+                        y: Style.space(5)
+                        width: parent.width - Style.space(10)
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        text: root.summaryShort()
+                        color: Color.foreground
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.bodySmall
+                        renderType: Text.NativeRendering
+
+                      }
+                    }
+
+                    // Expand affordance. Both codepoints are the chevrons the
+                    // rail group headers already ship, so no unverified glyph
+                    // enters the plugin.
+                    Text {
+                      id: expandGlyph
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      text: root.summaryExpanded ? String.fromCodePoint(0xF0140) : String.fromCodePoint(0xF0142)
+                      color: Color.muted
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                      renderType: Text.NativeRendering
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      acceptedButtons: Qt.LeftButton
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.summaryExpanded = !root.summaryExpanded
+                    }
                   }
-                }
 
-                Text {
-                  id: expandedSummary
-                  visible: root.summaryExpanded
-                  x: Style.space(5)
-                  y: Style.space(5)
-                  width: parent.width - Style.space(10)
-                  textFormat: Text.PlainText
-                  wrapMode: root.summaryExpanded ? Text.Wrap : Text.NoWrap
-                  elide: root.summaryExpanded ? Text.ElideNone : Text.ElideRight
-                  maximumLineCount: root.summaryExpanded ? 6 : 1
-                  text: root.summaryShort()
-                  color: Color.foreground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  renderType: Text.NativeRendering
+                  // (c) pass-progress underline. A width *binding* driven by
+                  // the ticker's own x — not a second animation — so the
+                  // ≤2 concurrent non-ticker animation budget is untouched
+                  // (7.11).
+                  Rectangle {
+                    visible: root.summaryShort() !== "" && !root.summaryExpanded
+                    width: parent.width
+                    height: Style.space(2)
+                    radius: height / 2
+                    color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
 
-                }
+                    Rectangle {
+                      // Fraction of the pass already travelled:
+                      //   1 - (x + contentW) / (viewportW + contentW)
+                      // 0 with the first character at the right edge,
+                      // 1 once the last character has cleared the left edge.
+                      // Reads only geometry that is set from above (viewport
+                      // width, measured text width, animated x); nothing here
+                      // feeds back into any of them, so there is no loop.
+                      width: {
+                        var contentW = marqueeText.implicitWidth
+                        var travel = tickerViewport.width + contentW
+                        if (!(travel > 0)) return 0
+                        var f = 1 - (tickerTrack.x + contentW) / travel
+                        return parent.width * Math.max(0, Math.min(1, f))
+                      }
+                      height: parent.height
+                      radius: parent.radius
+                      color: Color.accent
+                    }
+                  }
 
-                HoverHandler {
-                  id: tickHover
-                }
+                  // (d) status line: one caption-weight line beside the
+                  // generate control, inside the same card — never a second
+                  // equal-weight stacked line (6.5). Covers ready (empty),
+                  // stale, error, unavailable, absent and in-progress
+                  // (6.1–6.4, 6.6); while a run is in progress the cached
+                  // brief above stays on screen (6.6).
+                  Item {
+                    id: briefStatusRow
+                    visible: root.briefStatusText() !== "" || root.briefNeedsGenerate()
+                    width: parent.width
+                    height: Math.max(briefStatusLabel.implicitHeight,
+                      root.briefNeedsGenerate() ? generateBriefButton.implicitHeight : 0)
 
-                MouseArea {
-                  anchors.fill: parent
-                  acceptedButtons: Qt.LeftButton
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.summaryExpanded = !root.summaryExpanded
-                }
-              }
+                    Text {
+                      id: briefStatusLabel
+                      anchors.left: parent.left
+                      anchors.right: root.briefNeedsGenerate() ? generateBriefButton.left : parent.right
+                      anchors.rightMargin: Style.space(6)
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      maximumLineCount: 1
+                      text: root.briefStatusText()
+                      color: root.briefStatusAttention() ? Color.urgent : Color.muted
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      renderType: Text.NativeRendering
+                    }
 
-              // Needs-attention line: only when the cached summary
-              // explicitly contains such a section. Never invented.
-              Text {
-                visible: root.attentionText() !== ""
-                width: parent.width
-                textFormat: Text.PlainText
-                elide: Text.ElideRight
-                maximumLineCount: 1
-                text: "! " + root.attentionText()
-                color: Color.urgent
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-                renderType: Text.NativeRendering
-              }
+                    Button {
+                      id: generateBriefButton
+                      visible: root.briefNeedsGenerate()
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Generate summary"
+                      onClicked: root.generateSummary()
+                    }
+                  }
 
-              Row {
-                width: parent.width
-                spacing: Style.space(8)
-
-                Button {
-                  visible: !root.summary && !root.generating
-                  text: "Generate summary"
-                  onClicked: root.generateSummary()
-                }
-
-                Text {
-                  visible: root.generating
-                  textFormat: Text.PlainText
-                  text: "Generating…"
-                  color: Qt.darker(Color.foreground, 1.4)
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  renderType: Text.NativeRendering
-                }
-
-                Text {
-                  visible: !!root.summary && root.summary.status === "error" && !root.generating
-                  textFormat: Text.PlainText
-                  text: "Unavailable" + (root.summary && root.summary.message ? " — " + root.summary.message : "")
-                  color: Qt.darker(Color.foreground, 1.4)
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  renderType: Text.NativeRendering
-                }
-
-                Text {
-                  visible: !!root.summary && root.summary.status === "stale" && !root.generating
-                  textFormat: Text.PlainText
-                  text: "Outdated - generate a fresh summary"
-                  color: Color.urgent
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  renderType: Text.NativeRendering
+                  // Needs-attention line: only when the cached summary
+                  // explicitly contains such a section. Never invented, and
+                  // caption weight so it stays inside the card's hierarchy.
+                  Text {
+                    visible: root.attentionText() !== ""
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
+                    text: "! " + root.attentionText()
+                    color: Color.urgent
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    renderType: Text.NativeRendering
+                  }
                 }
               }
             }
@@ -1145,22 +1296,43 @@ Panel {
     return "Resume: open terminal at " + dir
   }
 
-  // The viewport clips the full bounded brief; the marquee track carries the
-  // complete text and a separator so the loop never exposes an empty gap.
-  function summaryText() {
-    var full = summaryShort()
-    if (full === "") return ""
-    if (full.length <= 170) return full
-    var cut = full.slice(0, 160)
-    var sp = cut.lastIndexOf(" ")
-    if (sp > 100) cut = cut.slice(0, sp)
-    return cut + " →"
-  }
-
+  // The viewport clips; the marquee track carries the complete brief text and
+  // horizontal motion exposes the tail. No truncation, no filler.
   function summaryShort() {
     if (!summary) return ""
     if (summary.status === "error") return ""
     return String(summary.text || "").replace(/\s+/g, " ").trim()
+  }
+
+  // Status line for the brief card. Every string is either a fixed panel
+  // string or a value the Summary_Record itself carries (its status word and
+  // its own failure message) — the panel adds no interpretation of the brief
+  // (6.7). `ready` returns empty: the ● indicator alone says "current".
+  function briefStatusText() {
+    if (root.generating) return "Generating…"
+    if (!summary) return "No brief yet"
+    var st = String(summary.status || "")
+    if (st === "ready") return ""
+    if (st === "stale") return "Outdated"
+    var msg = String(summary.message || "")
+    return msg !== "" ? "Unavailable — " + msg : "Unavailable"
+  }
+
+  // Stale, error and unavailable are the states the human has to act on;
+  // generating and absent are neutral.
+  function briefStatusAttention() {
+    if (root.generating || !summary) return false
+    var st = String(summary.status || "")
+    return st === "stale" || st === "error" || st === "unavailable"
+  }
+
+  // The generate control accompanies every non-current state — stale, error,
+  // unavailable and absent (6.2, 6.3, 6.4) — and stands down while a run is
+  // already in progress so one click cannot start two.
+  function briefNeedsGenerate() {
+    if (root.generating) return false
+    if (!summary) return true
+    return String(summary.status || "") !== "ready"
   }
 
   // "Needs attention" line, only when the cached summary explicitly
