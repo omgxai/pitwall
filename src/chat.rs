@@ -6842,9 +6842,10 @@ mod property_tests {
                 prop_assert_eq!(
                     record.harness_calls,
                     usize::from(record.class == "question"),
-                    "{:?} ran the harness {} time(s)",
+                    "{:?} ran the harness {} time(s); answer was {:?}",
                     record.input,
-                    record.harness_calls
+                    record.harness_calls,
+                    record.answer
                 );
                 if record.class == "question" {
                     // 12.5: the observation is taken *after* the question was
@@ -7196,7 +7197,10 @@ mod property_tests {
                 prop_assert_eq!(record.class, "question");
                 prop_assert_eq!(record.resume_attempts, 0);
                 prop_assert_eq!(record.actions, 0);
-                prop_assert_eq!(record.harness_calls, 1);
+                // The recorded answer names the refusal class when the
+                // harness was not reached, which is the difference between a
+                // production defect and a non-hermetic fixture.
+                prop_assert_eq!(record.harness_calls, 1, "answer was {:?}", record.answer);
             }
 
             // The totals, from the platform's own recording.
