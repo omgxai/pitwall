@@ -56,14 +56,27 @@ pub fn scrub_string(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         // PEM block: redact through the END line.
+        //
+        // The BEGIN marker alone decides *that* the block is redacted; the
+        // END marker and the newline after it only locate how far. Requiring
+        // either to be present was a leak: a block that ends at the end of
+        // the input has no trailing newline, and a truncated capture has no
+        // END marker at all, and both used to fall through to the byte copy
+        // below, which emitted the whole key verbatim. `present_answer`
+        // trims before scrubbing, so a harness answer ending in a key always
+        // arrives without that trailing newline.
         if s[i..].starts_with("-----BEGIN") && s[i..].contains("PRIVATE KEY-----") {
-            if let Some(end) = s[i..].find("-----END") {
-                if let Some(nl) = s[i + end..].find('\n') {
-                    out.push_str("[redacted-pem-block]");
-                    i += end + nl;
-                    continue;
-                }
-            }
+            let block = &s[i..];
+            // Stop *at* the newline rather than past it, so it is emitted
+            // normally on the next pass and the line structure is preserved.
+            // Absent either landmark, the block runs to the end of the input.
+            let extent = block
+                .find("-----END")
+                .and_then(|end| block[end..].find('\n').map(|nl| end + nl))
+                .unwrap_or(block.len());
+            out.push_str("[redacted-pem-block]");
+            i += extent;
+            continue;
         }
         // key=value style secrets: password/passwd/secret/token, bearer.
         // Values run to whitespace (over-redacting trailing punctuation
@@ -1030,6 +1043,27 @@ mod tests {
         assert!(!scrubbed.contains("MIIB"));
         assert!(scrubbed.contains("[redacted-pem-block]"));
         assert!(scrubbed.contains("tail"));
+        // A block that ends at the end of the input has no trailing newline.
+        // `present_answer` trims before scrubbing, so every harness answer
+        // ending in a key arrives in exactly this shape; it must still vanish.
+        let at_end = format!(
+            "answer -----BEGIN {} PRIVATE KEY-----\nMIIB\n-----END {} PRIVATE KEY-----",
+            "RSA", "RSA"
+        );
+        let scrubbed_at_end = scrub_string(&at_end);
+        assert!(!scrubbed_at_end.contains("MIIB"), "{scrubbed_at_end}");
+        assert!(
+            scrubbed_at_end.contains("[redacted-pem-block]"),
+            "{scrubbed_at_end}"
+        );
+        // A truncated capture carries no END marker at all, and leaks nothing.
+        let truncated = format!("answer -----BEGIN {} PRIVATE KEY-----\nMIIB", "RSA");
+        let scrubbed_truncated = scrub_string(&truncated);
+        assert!(!scrubbed_truncated.contains("MIIB"), "{scrubbed_truncated}");
+        assert!(
+            scrubbed_truncated.contains("[redacted-pem-block]"),
+            "{scrubbed_truncated}"
+        );
         // Ordinary text passes through untouched.
         assert_eq!(
             scrub_string(" nothing secret here 123 "),

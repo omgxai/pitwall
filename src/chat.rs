@@ -6655,6 +6655,12 @@ mod property_tests {
         /// Did a fresh observation happen after this line was read and before
         /// the harness ran? Only meaningful for a question.
         observed_before_call: bool,
+        /// The answer recorded for this turn, when it was a question.
+        ///
+        /// Captured per turn rather than read back out of the conversation at
+        /// the end, because `/clear` empties the conversation by design
+        /// (19.4): an answer erased afterwards was still answered here.
+        answer: Option<String>,
     }
 
     struct DriveOutcome {
@@ -6689,6 +6695,7 @@ mod property_tests {
             let mut resume_attempts = 0usize;
             let mut observed_before_call = false;
             let mut ended = false;
+            let mut answer_text: Option<String> = None;
 
             let class = match classify(line) {
                 ChatInput::Blank => "blank",
@@ -6755,6 +6762,7 @@ mod property_tests {
                         Err(e) => e.message(),
                     };
                     conversation.record(Role::Pitwall, at, &answer);
+                    answer_text = Some(answer);
                     "question"
                 }
                 ChatInput::QuestionTooLong { chars } => {
@@ -6774,6 +6782,7 @@ mod property_tests {
                 resume_attempts,
                 actions: plat.actions() - actions_before,
                 observed_before_call,
+                answer: answer_text,
             });
             if ended {
                 break;
@@ -6852,11 +6861,17 @@ mod property_tests {
             prop_assert_eq!(sandbox.invocations(), questions);
             // Every question got that harness's answer back, so the counted
             // invocations are the ones that actually answered.
+            //
+            // Read from the turn records, not from the conversation at the
+            // end: `/clear` empties the conversation by design (19.4), and an
+            // answer erased by a later command was still answered when its
+            // question was asked. This also binds each answer to its own
+            // question turn instead of counting matching turns anywhere in
+            // the transcript, so it is the stricter of the two readings.
             let answered = run
-                .conversation
-                .turns()
+                .turns
                 .iter()
-                .filter(|t| t.role() == Role::Pitwall && t.text() == answer.as_str())
+                .filter(|t| t.answer.as_deref() == Some(answer.as_str()))
                 .count();
             prop_assert_eq!(answered, questions);
             // 12.8: nothing staged outlives the run, on any path.
