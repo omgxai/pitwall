@@ -568,6 +568,15 @@ Panel {
                renderType: Text.NativeRendering
              }
 
+             Text {
+               textFormat: Text.PlainText
+               text: " \u00b7 " + stateReader.sessionCount
+               color: Color.muted
+               font.family: Style.font.family
+               font.pixelSize: Style.font.bodySmall
+               renderType: Text.NativeRendering
+             }
+
 
           // ---- settings view (replaces rail while open) ----
           Column {
@@ -977,7 +986,12 @@ Panel {
     var nid = Number(id) || 0
     if (nid <= 0) return
     runFixed([root.pitwallBinary, "notifications", "read", String(nid)], function(code) {
-      if (code !== 0) console.warn("pitwall", "notification read exited", code)
+      if (code !== 0) {
+        console.warn("pitwall", "notification read exited", code)
+        root.announce("Could not mark notification read.", true)
+      } else {
+        root.announce("Notification marked read.", false)
+      }
       stateReader.refresh()
     })
   }
