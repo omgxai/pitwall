@@ -29,6 +29,7 @@ Panel {
   property bool generating: false
   property string feedbackText: ""
   property bool feedbackAttention: false
+  property int tickerIndex: 0
   // The installer places the binary in the user-local bin directory. Keep a
   // PATH fallback for development environments that provide another install.
   readonly property string pitwallBinary: {
@@ -657,7 +658,7 @@ Panel {
                   wrapMode: root.summaryExpanded ? Text.Wrap : Text.NoWrap
                   elide: root.summaryExpanded ? Text.ElideNone : Text.ElideRight
                   maximumLineCount: root.summaryExpanded ? 6 : 1
-                  text: root.summaryText()
+                   text: root.tickerText()
                   color: Color.foreground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
@@ -690,7 +691,8 @@ Panel {
                       easing.type: Easing.InOutQuad
                     }
                   }
-                  onDriftChanged: if (!drift) x = 0
+                   onDriftChanged: if (!drift) x = 0
+                   onTextChanged: x = 0
 
                   HoverHandler {
                     id: tickHover
@@ -703,6 +705,14 @@ Panel {
                     onClicked: root.summaryExpanded = !root.summaryExpanded
                   }
                 }
+              }
+
+              Timer {
+                interval: 7000
+                repeat: true
+                running: root.opened && !root.summaryExpanded && !tickHover.hovered
+                  && root.summaryItems().length > 1
+                onTriggered: root.tickerIndex = (root.tickerIndex + 1) % root.summaryItems().length
               }
 
               // Needs-attention line: only when the cached summary
@@ -1102,6 +1112,24 @@ Panel {
     if (!summary) return ""
     if (summary.status === "error") return ""
     return String(summary.text || "").replace(/\s+/g, " ").trim()
+  }
+
+  function summaryItems() {
+    var text = summaryShort()
+    if (text === "") return []
+    var parts = text.split(/(?:\n+|[.!?]\s+)/)
+    var out = []
+    for (var i = 0; i < parts.length; i++) {
+      var item = String(parts[i] || "").trim()
+      if (item !== "") out.push(item)
+    }
+    return out.length > 0 ? out : [text]
+  }
+
+  function tickerText() {
+    var items = summaryItems()
+    if (items.length === 0) return ""
+    return items[Math.min(tickerIndex, items.length - 1)]
   }
 
   // "Needs attention" line, only when the cached summary explicitly
