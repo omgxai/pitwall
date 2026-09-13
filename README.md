@@ -19,8 +19,9 @@ question from the Omarchy desktop:
 SEE → UNDERSTAND → REMEMBER → RESUME → CONTROL → DELEGATE → NOTIFY
 ```
 
-> **Status:** v0.1.0 in development. M5 + M5g slices (semantic tree,
-> assign, notification inbox) implemented and frozen; UI frozen.
+> **Status:** v0.1.0 in development. M5 + M5g (semantic tree, assignment,
+> notification inbox) and M6 user-local packaging are implemented; the UI
+> remains deliberately compact and Omarchy-native.
 > `pitwall status` observes · `snapshot` persists · `checkpoint`
 > records · `resume` focuses or reopens · `summarize` asks your
 > configured agent (cached locally) · `assign` runs a validated task
@@ -49,6 +50,23 @@ work that continues while you are away.
 The problem is not "where is my terminal?" The problem is "what is
 happening across all of it, what changed, what needs me, and where do
 I continue?" Pitwall answers that without opening twelve windows.
+
+## How it works
+
+Pitwall keeps the observation path local and explicit:
+
+```text
+Hyprland + /proc
+      -> bounded collector
+      -> hash-gated SQLite continuity + state.json
+      -> Omarchy Quickshell panel
+      -> optional, user-triggered agent summary
+```
+
+The panel reads the generated artifact; it does not inspect processes or
+infer meaning itself. The optional systemd timer runs the same oneshot
+snapshot every 30 seconds. AI summaries use a temporary sanitized context,
+are cached by deterministic input hash, and never become a background agent.
 
 ## Who is it for?
 
