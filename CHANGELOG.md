@@ -6,6 +6,10 @@ All notable changes to Pitwall are documented here. Format follows
 
 ## [Unreleased]
 
+No unreleased changes.
+
+## [0.1.0] - 2026-09-13
+
 ### Changed
 - Tightened the optional snapshot timer from five minutes to 30 seconds so
   session appearance, disappearance, and stop transitions reach the watched

@@ -9,7 +9,7 @@
   plugin binary resolution (`df397a7`), `pitwall doctor` diagnostics
   (`cb562ef`), and current product README (`c50f1c1`). Clean-room install,
   first-run state creation, data-preserving uninstall, systemd verification,
-  and release builds pass.
+  release builds, and the v0.1.0 release gate pass.
 
 - **M0 — Repository foundation**: COMPLETE, pushed (`62fdfdb`).
 - **M1 — Workspace/process discovery**: COMPLETE, pushed (`7f5ec34`).

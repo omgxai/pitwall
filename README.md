@@ -19,7 +19,7 @@ question from the Omarchy desktop:
 SEE → UNDERSTAND → REMEMBER → RESUME → CONTROL → DELEGATE → NOTIFY
 ```
 
-> **Status:** v0.1.0 in development. M5 + M5g (semantic tree, assignment,
+> **Status:** v0.1.0. M5 + M5g (semantic tree, assignment,
 > notification inbox) and M6 user-local packaging are implemented; the UI
 > remains deliberately compact and Omarchy-native.
 > `pitwall status` observes · `snapshot` persists · `checkpoint`
@@ -249,8 +249,8 @@ temporary remote summary sharing.
 
 ## Install
 
-The supported development-stage install is user-local and does not require
-root. From a Pitwall checkout:
+The supported install is user-local and does not require root. From a Pitwall
+checkout:
 
 ```bash
 git clone <repo-url> ~/Projects/pitwall

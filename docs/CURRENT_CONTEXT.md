@@ -278,8 +278,8 @@ forever — except autonomy/safety bans, which stand.)
 M0–M5f built; M5 + M5g slices (tree, assign, inbox) built and frozen;
 brand asset added. M6 user-local packaging is implemented: `install.sh`
 installs the release binary, plugin, and optional user units; the clean-room
-smoke test passes; uninstall preserves user data. Remaining M6 work is
-fresh-machine Omarchy verification and release tagging.
+smoke test passes; uninstall preserves user data. The v0.1.0 release gate
+passes; fresh-machine Omarchy verification remains a follow-up limitation.
 Directions: AI Workforce Design + community Recipes (see
 `docs/AI_WORKFORCE.md`, `docs/RECIPES.md`). Contribute: recipes,
 patterns, Omarchy integration, detection, docs, tests. MIT.
