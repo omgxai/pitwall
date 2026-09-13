@@ -276,8 +276,10 @@ forever — except autonomy/safety bans, which stand.)
 ## 16. Public Roadmap
 
 M0–M5f built; M5 + M5g slices (tree, assign, inbox) built and frozen;
-brand asset added. Next: `docs/NEXT_SPRINT.md` (P0 hardening → P7
-sharing), then M6 packaging/release.
+brand asset added. M6 user-local packaging is implemented: `install.sh`
+installs the release binary, plugin, and optional user units; the clean-room
+smoke test passes; uninstall preserves user data. Remaining M6 work is
+fresh-machine Omarchy verification and release tagging.
 Directions: AI Workforce Design + community Recipes (see
 `docs/AI_WORKFORCE.md`, `docs/RECIPES.md`). Contribute: recipes,
 patterns, Omarchy integration, detection, docs, tests. MIT.
