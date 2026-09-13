@@ -655,28 +655,12 @@ impl Store {
         Ok(row)
     }
 
-    /// Last time a session was seen live (newest retained observation
-    /// containing it), or -1 when outside retained history.
-    fn last_sighting(&self, session_id: &str) -> Result<i64, StoreError> {
-        let at: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT MAX(o.collected_at) FROM observations o
-                 JOIN sessions s ON s.observation_id = o.id
-                 WHERE s.session_id = ?1",
-                rusqlite::params![session_id],
-                |row| row.get(0),
-            )
-            .map_err(StoreError::from)?;
-        Ok(at.unwrap_or(-1))
-    }
-
-    /// Newest disappearance-checkpoint time for a session, if any.
+    /// Newest disappearance observation for a session, if any.
     fn last_disappearance_checkpoint(&self, session_id: &str) -> Result<Option<i64>, StoreError> {
         let at: Option<i64> = self
             .conn
             .query_row(
-                "SELECT MAX(created_at) FROM checkpoints
+                "SELECT MAX(observation_id) FROM checkpoints
                  WHERE session_id = ?1 AND trigger = ?2",
                 rusqlite::params![session_id, trigger::DISAPPEARANCE],
                 |row| row.get(0),
@@ -718,9 +702,9 @@ impl Store {
     /// and `current_observation_id` (whose live ids are `live_ids`).
     ///
     /// Suppression: at most one disappearance checkpoint per continuous
-    /// absence — a session already checkpointed at-or-after its last live
-    /// sighting is skipped. Reappearance resets this (a later vanishing
-    /// has a newer sighting). Returns new checkpoint ids.
+    /// absence, keyed by observation order rather than wall-clock seconds.
+    /// Reappearance resets this even within one second or after clock rollback.
+    /// Returns new checkpoint ids.
     pub fn checkpoint_disappearances(
         &mut self,
         live_ids: &[String],
@@ -736,9 +720,8 @@ impl Store {
             if live_ids.iter().any(|live| live == &sid) {
                 continue;
             }
-            let sighting = self.last_sighting(&sid)?;
             if let Some(already) = self.last_disappearance_checkpoint(&sid)? {
-                if already >= sighting {
+                if already >= current_observation_id {
                     continue; // same continuous absence — suppress.
                 }
             }
@@ -985,8 +968,21 @@ impl Store {
             self.conn
                 .execute(
                     "UPDATE notifications SET created_at = ?1, detail = ?2,
-                     severity = ?3, project_name = ?4 WHERE id = ?5",
-                    rusqlite::params![created_at, detail, severity, project_name, existing],
+                     severity = ?3, project_name = ?4, project_id = ?6,
+                     branch = ?7, agent_kind = ?8, state = ?9, checkpoint_id = ?10
+                     WHERE id = ?5",
+                    rusqlite::params![
+                        created_at,
+                        detail,
+                        severity,
+                        project_name,
+                        existing,
+                        project_id,
+                        branch,
+                        agent_kind,
+                        state,
+                        checkpoint_id
+                    ],
                 )
                 .map_err(StoreError::from)?;
             return Ok(existing);
@@ -1164,9 +1160,9 @@ impl Store {
     /// Derive inbox rows for one snapshot transition (called after persist
     /// writes the current observation). Pure diff, bounded output:
     /// appeared/vanished informational, newly-stopped attention. Dedup
-    /// inside notify() keeps one unread per kind+session; continuous
-    /// absence never re-fires because last_sighting only advances on
-    /// reappearance (same suppression shape as disappearance checkpoints).
+    /// inside notify() keeps one unread per kind+session. The previous
+    /// snapshot must be the immediately preceding observation: the diff
+    /// suppresses steady states, while new transitions refresh unread rows.
     /// Returns new-or-refreshed row count. Never fails the snapshot.
     pub fn sync_snapshot_notifications(
         &mut self,
@@ -1178,11 +1174,8 @@ impl Store {
             prev.iter().map(|p| (p.session_id.as_str(), p)).collect();
         let curr_ids: std::collections::HashSet<&str> =
             curr.sessions.iter().map(|s| s.id.as_str()).collect();
-        // Fire-only-on-new wrapper: an existing unread row for the same
-        // kind+session suppresses repeats (continuous absence or steady
-        // state must not re-notify every snapshot).
         let mut fired = 0;
-        let fire_if_new = |store: &Store,
+        let fire_if_new = |store: &mut Store,
                            kind: &str,
                            session_id: &str,
                            project_id: &str,
@@ -1194,10 +1187,7 @@ impl Store {
                            detail: &str,
                            fired: &mut usize|
          -> Result<(), StoreError> {
-            if store.unread_notification(kind, session_id)?.is_some() {
-                return Ok(());
-            }
-            store.insert_notification_row(
+            store.notify(
                 kind,
                 session_id,
                 project_id,
@@ -1516,15 +1506,41 @@ impl Store {
 /// On failure the previous file is untouched — the last good artifact is
 /// preserved by construction.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    // Exclusive, per-writer siblings prevent truncating another writer's
+    // pending file (or following a pre-existing temporary symlink).
+    let (tmp, mut file) = loop {
+        let tmp = path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
+    let result = (|| {
+        file.write_all(bytes)?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1541,7 +1557,8 @@ mod tests {
 
     fn test_dir(name: &str) -> PathBuf {
         let n = TEST_SEQ.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("pitwall-m2-{name}-{n}"));
+        let dir =
+            std::env::temp_dir().join(format!("pitwall-m2-{name}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1599,6 +1616,77 @@ mod tests {
             hostname: "testbox".to_string(),
             sessions: vec![sample_session("sess_1", SessionState::Running)],
         }
+    }
+
+    #[test]
+    fn atomic_writers_publish_complete_independent_files() {
+        let dir = test_dir("atomic-concurrent");
+        let path = dir.join("state.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..10 {
+                        atomic_write(&path, &vec![b'a' + i; 65536]).unwrap();
+                        let bytes = std::fs::read(&path).unwrap();
+                        assert_eq!(bytes.len(), 65536);
+                        assert!(bytes.iter().all(|b| *b == bytes[0]));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_failed_rename_cleans_temporary_file() {
+        let dir = test_dir("atomic-failure");
+        let path = dir.join("state.json");
+        std::fs::create_dir(&path).unwrap();
+        assert!(atomic_write(&path, b"new").is_err());
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn new_stop_transition_refreshes_unread_context() {
+        let dir = test_dir("notif-refire");
+        let mut store = Store::open(&dir.join("pitwall.db")).unwrap();
+        let mut snap = sample_snapshot();
+        store.persist(&snap).unwrap();
+        let prev = store
+            .observation_sessions(store.latest_observation().unwrap().unwrap().0)
+            .unwrap();
+        snap.sessions[0].state = SessionState::Stopped;
+        assert_eq!(
+            store
+                .sync_snapshot_notifications(&prev, &snap, 100)
+                .unwrap(),
+            1
+        );
+        let id = store.unread_notifications(10).unwrap()[0].id;
+        // A later running -> stopped transition with changed project context.
+        snap.sessions[0].project.as_mut().unwrap().branch = Some("topic".into());
+        assert_eq!(
+            store
+                .sync_snapshot_notifications(&prev, &snap, 200)
+                .unwrap(),
+            1
+        );
+        let rows = store.unread_notifications(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].created_at, 200);
+        assert_eq!(rows[0].branch.as_deref(), Some("topic"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1854,11 +1942,9 @@ mod tests {
             .unwrap();
         assert!(again.is_empty());
         assert_eq!(store.checkpoint_count().unwrap(), 1);
-        // Reappearance then re-vanishing fires anew. The re-sighting must
-        // carry a newer collected_at than the first checkpoint (as wall
-        // clock guarantees live).
+        // Reappearance then re-vanishing fires even with clock rollback.
         let mut snap_c = snap_with_sessions(&["sess_1", "sess_2"]);
-        snap_c.collected_at_epoch = 1_700_000_550;
+        snap_c.collected_at_epoch = 1_700_000_000;
         snap_c.sessions[0].process_count = 9;
         let obs3 = match store.persist(&snap_c).unwrap() {
             PersistOutcome::Written { observation_id } => observation_id,
@@ -2339,7 +2425,13 @@ mod tests {
             1,
             "only stopped badges"
         );
-        // Repeat run fires nothing new (dedup: same continuous states).
+        // A steady observation fires nothing, even after reading its inbox.
+        store.persist(&snap0).unwrap();
+        let latest = store.latest_observation().unwrap().unwrap().0;
+        let prev = store.observation_sessions(latest).unwrap();
+        for n in store.unread_notifications(10).unwrap() {
+            store.mark_notification_read(n.id, 250).unwrap();
+        }
         let n2 = store
             .sync_snapshot_notifications(&prev, &snap0, 300)
             .unwrap();

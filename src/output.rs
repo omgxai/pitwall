@@ -361,7 +361,17 @@ pub fn snapshot_to_state_json(
         ));
     }
     out.push_str("],\"resumable\":[");
-    for (i, cp) in resumable.iter().take(RESUMABLE_CAP).enumerate() {
+    let mut seen: std::collections::HashSet<&str> = s
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect();
+    for (i, cp) in resumable
+        .iter()
+        .filter(|cp| seen.insert(cp.session_id.as_str()))
+        .take(RESUMABLE_CAP)
+        .enumerate()
+    {
         if i > 0 {
             out.push(',');
         }
@@ -1031,6 +1041,27 @@ mod tests {
         assert!(body.contains("\"note\":\"halfway through auth\""), "{body}");
         assert!(!body.contains("\"pid\""), "{body}");
         assert!(!body.contains("evidence"), "{body}");
+    }
+
+    #[test]
+    fn resumable_excludes_live_and_duplicate_sessions_before_cap() {
+        let snap = sample_snapshot();
+        let mut cps = vec![sample_checkpoint(100, "sess_abc")];
+        cps.extend((0..20).map(|i| sample_checkpoint(i, "sess_old")));
+        cps.push(sample_checkpoint(99, "sess_other"));
+        let state = snapshot_to_state_json(
+            &snap,
+            &cps,
+            None,
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &[],
+            0,
+        );
+        assert_eq!(state.matches("\"checkpoint_id\"").count(), 2);
+        assert!(state.contains("\"checkpoint_id\":99"));
+        assert!(!state.contains("\"checkpoint_id\":100"));
+        assert_valid_json(&state);
     }
 
     #[test]

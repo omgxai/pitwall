@@ -286,6 +286,13 @@ fn classify_agent(
     window: Option<&WindowInfo>,
     role: WindowRole,
 ) -> AgentIdentity {
+    if role == WindowRole::App {
+        return AgentIdentity {
+            kind: AgentKind::Unknown,
+            confidence: Confidence::Unknown,
+            evidence: Vec::new(),
+        };
+    }
     // (command token, kind, title prefix)
     const KNOWN: &[(&str, AgentKind, &str)] = &[
         ("opencode", AgentKind::Opencode, "OC |"),
@@ -501,17 +508,14 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
         let mut stack = vec![window.pid];
         let mut seen = std::collections::HashSet::new();
         while let Some(pid) = stack.pop() {
-            if !seen.insert(pid) {
+            if pid == self_pid || !seen.insert(pid) {
                 continue;
             }
-            if pid != self_pid {
-                tree.push(pid);
-            }
+            tree.push(pid);
             if let Some(kids) = children.get(&pid) {
                 stack.extend(kids.iter().copied());
             }
         }
-        let process_count = tree.len();
         let mut processes: Vec<ProcessInfo> = tree
             .iter()
             .filter_map(|pid| by_pid.get(pid))
@@ -527,7 +531,7 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
             })
             .collect();
         processes.sort_by_key(|p| p.pid);
-        processes.truncate(MAX_SESSION_PROCESSES);
+        let process_count = processes.len();
 
         let project = project_dir_for(&processes).map(|raw_dir| {
             // P1: normalize before hashing or displaying, so `/x/`,
@@ -549,6 +553,7 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
         let state = derive_session_state(&processes);
         let last_activity_epoch = processes
             .iter()
+            .filter(|p| p.pid != window.pid)
             .map(|p| p.started_at_epoch)
             .filter(|e| *e > 0)
             .max()
@@ -562,10 +567,12 @@ pub fn collect(platform: &dyn Platform) -> WorkspaceSnapshot {
             ),
         };
         let summary = build_summary(&agent, project.as_ref(), state, process_count);
+        processes.truncate(MAX_SESSION_PROCESSES);
+        let root_pid = window.pid;
         sessions.push(TerminalSession {
             id,
             window: Some(window),
-            root_pid: tree.first().copied().unwrap_or(0),
+            root_pid,
             role,
             project,
             agent,
@@ -785,7 +792,7 @@ mod tests {
         assert_eq!(s.agent.evidence, vec!["terminal context only".to_string()]);
         assert!(s.project.is_none(), "root cwd must not become a project");
         assert_eq!(s.state, SessionState::Sleeping);
-        assert_eq!(s.last_activity_epoch, 1_700_000_000);
+        assert_eq!(s.last_activity_epoch, -1);
     }
 
     #[test]
@@ -1102,6 +1109,65 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_facts_use_full_tree_before_display_cap() {
+        let mut plat = agent_session_platform();
+        plat.windows[0].class = "foot".into();
+        plat.windows[0].initial_class = "foot".into();
+        plat.windows[0].title.clear();
+        plat.processes = (100..140)
+            .map(|pid| {
+                raw(
+                    pid,
+                    if pid == 100 { 1 } else { 100 },
+                    "sh",
+                    "sh",
+                    "/",
+                    'S',
+                    100,
+                )
+            })
+            .collect();
+        plat.processes.push(raw(
+            999,
+            100,
+            "opencode",
+            "opencode",
+            "/home/u/Work",
+            'T',
+            9000,
+        ));
+        let snap = collect(&plat);
+        let s = &snap.sessions[0];
+        assert_eq!(s.processes.len(), MAX_SESSION_PROCESSES);
+        assert_eq!(s.process_count, 41);
+        assert_eq!(s.state, SessionState::Stopped);
+        assert_eq!(s.agent.kind, AgentKind::Opencode);
+        assert_eq!(s.last_activity_epoch, 1_700_000_090);
+        assert_eq!(s.project.as_ref().unwrap().dir, "/home/u/Work");
+    }
+
+    #[test]
+    fn missing_window_root_is_not_counted_as_observed_process() {
+        let mut plat = agent_session_platform();
+        plat.processes.clear();
+        let snap = collect(&plat);
+        assert_eq!(snap.sessions[0].process_count, 0);
+        assert_eq!(snap.sessions[0].root_pid, 100);
+        assert_eq!(snap.sessions[0].last_activity_epoch, -1);
+    }
+
+    #[test]
+    fn app_window_ignores_agent_named_descendants_and_titles() {
+        let mut plat = agent_session_platform();
+        plat.windows[0].class = "chromium".into();
+        plat.windows[0].initial_class = "chromium".into();
+        let snap = collect(&plat);
+        assert_eq!(snap.sessions[0].agent.kind, AgentKind::Unknown);
+        assert_eq!(snap.sessions[0].agent.confidence, Confidence::Unknown);
+        assert!(snap.sessions[0].agent.evidence.is_empty());
+    }
+
+    #[test]
     fn collector_excludes_its_own_process() {
         let self_pid = std::process::id();
         let plat = MockPlatform {
@@ -1117,6 +1183,15 @@ mod tests {
                     'R',
                     99999,
                 ),
+                raw(
+                    self_pid + 1,
+                    self_pid,
+                    "git",
+                    "git status",
+                    "/home/u/Work",
+                    'R',
+                    100000,
+                ),
             ],
             windows: vec![window("0x3", "foot", "t", 400)],
             repos: HashMap::new(),
@@ -1125,8 +1200,8 @@ mod tests {
         let s = &snap.sessions[0];
         assert!(s.processes.iter().all(|p| p.pid != self_pid));
         assert_eq!(s.process_count, 1);
-        // last_activity must come from the shell, not the observer.
-        assert_eq!(s.last_activity_epoch, 1_700_000_000);
+        // No observed descendant remains; the window root is not child activity.
+        assert_eq!(s.last_activity_epoch, -1);
     }
 
     #[test]
