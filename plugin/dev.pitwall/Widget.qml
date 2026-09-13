@@ -822,11 +822,25 @@ Panel {
                 width: railColumn.width
                 spacing: Style.space(4)
 
-                Item {
-                  width: parent.width
-                  height: Style.font.bodySmall + Style.space(4)
+                 Item {
+                   width: parent.width
+                   height: Style.font.bodySmall + Style.space(4)
 
-                  Row {
+                   Rectangle {
+                     anchors.fill: parent
+                     color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.025)
+                     radius: Style.space(2)
+                   }
+
+                   Rectangle {
+                     anchors.left: parent.left
+                     anchors.right: parent.right
+                     anchors.bottom: parent.bottom
+                     height: 1
+                     color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
+                   }
+
+                   Row {
                     anchors.left: parent.left
                     anchors.right: toggleGlyph.left
                     anchors.rightMargin: Style.space(4)

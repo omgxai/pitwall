@@ -197,7 +197,7 @@ Column {
       anchors.right: parent.right
       anchors.top: barLabel.bottom
       anchors.topMargin: Style.space(4)
-      height: Style.space(12)
+      height: Style.space(8)
       color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.08)
     }
 
