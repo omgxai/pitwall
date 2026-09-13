@@ -6,12 +6,14 @@
 //! persists to the local SQLite continuity cache, and refreshes the
 //! `state.json` artifact. No daemon, no network, observation only.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use pitwall_lib::chat;
 use pitwall_lib::collector;
 use pitwall_lib::output;
-use pitwall_lib::platform::Platform;
+use pitwall_lib::platform::{Platform, TerminalSpec};
 use pitwall_lib::store;
 use pitwall_lib::summary as summary_mod;
 
@@ -36,6 +38,8 @@ fn print_help() {
     println!("                     [--note TEXT] [--session-id ID]");
     println!("    resume           Focus a live session or open its project terminal");
     println!("                     --session-id ID [--data-dir DIR]");
+    println!("    chat             Open a native Pitwall Chat terminal and talk to it");
+    println!("                     [--session sess_ID]");
     println!("    agents           List supported AI agents and detection status");
     println!("    models           List models for an agent (--agent ID, default opencode)");
     println!("    summarize        Ask the configured agent for a workspace summary");
@@ -558,6 +562,648 @@ fn cmd_resume(args: &[String]) -> ExitCode {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `pitwall chat` — tasks 12.1 and 12.2 (design §4.2, §4.3)
+//
+// One subcommand, two shapes, one code path. Everything the chat itself does
+// lives in `pitwall_lib::chat`; this file is the startup order, the exit-code
+// classification, and the input loop's dispatch table — nothing more.
+//
+// **The startup order is the safety contract** (design §4.3, Requirement
+// 23.2). Usage-class refusals are decided before operational ones, so a
+// malformed `--session` exits 2 even when the configured harness is also
+// missing, and nothing environmental is touched until the usage group has
+// passed. No terminal, no harness invocation, no context file and no chat
+// number exists on any refusal path.
+//
+// **The config is read exactly once, here.** `chat.rs` deliberately contains
+// no config read at all, so the harness and model travel from this function
+// into `ChatDescriptor::capture` and can never be re-read for the lifetime of
+// the process (Requirements 11.1, 11.3, 11.4).
+// ---------------------------------------------------------------------------
+
+/// Erase the display and home the cursor. The only raw control sequence in
+/// this file: `/clear` clears a *terminal*, which is not chat presentation
+/// and so has no place in `chat.rs`.
+const CLEAR_SCREEN: &str = "\u{1b}[2J\u{1b}[H";
+
+/// Why `pitwall chat` refused to start, and with which exit code.
+///
+/// One value per refusal, so the 0/1/2 contract of Requirement 23.2 is a
+/// property of the *refusal* rather than of whichever early return happened
+/// to produce it: [`ChatRefusal::code`] is the single place that says which
+/// class a failure belongs to, and [`ChatRefusal::report`] is the single
+/// place that prints one.
+///
+/// Refusals never echo a value that could carry a control character into the
+/// terminal: a malformed session id and a malformed model id are named by
+/// class, exactly as [`pitwall_lib::resume::resume`] and
+/// [`pitwall_lib::config::Config::set`] already name them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatRefusal {
+    /// Step 1: an option the Chat_Command does not accept (9.6).
+    UnknownOption { entered: String },
+    /// Step 1: `--session` with nothing after it. Refused rather than
+    /// silently treated as a whole-workspace chat (9.2, 9.4).
+    SessionValueMissing,
+    /// Step 2: `--session` outside `sess_[0-9a-f]{16}` (9.4).
+    MalformedSession,
+    /// Step 3: the configured model fails `summary::valid_model` (11.7).
+    MalformedModel,
+    /// Step 4: the configured harness is not a known agent id (11.6).
+    UnknownHarness { harness: String },
+    /// Step 4: the harness is known but not installed here (11.6).
+    HarnessNotInstalled { harness: String },
+    /// Step 5: `--session` names a session that is not currently live (9.5).
+    SessionNotLive { session_id: String },
+    /// Step 6: every chat number `001..999` is in use (10.5).
+    NoChatNumber { reason: String },
+    /// No candidate directory exists at all (16.7).
+    NoDirectory,
+    /// The chosen directory is not absolute (16.7). Named, never swapped.
+    DirectoryNotAbsolute { directory: String },
+    /// The chosen directory does not exist as a directory (16.7).
+    DirectoryUnavailable { directory: String },
+    /// The running binary's absolute path could not be resolved, so the
+    /// relaunch argv cannot be built honestly (16.6).
+    BinaryUnresolved,
+    /// The single Terminal_Launch_Path refused or failed (16.8).
+    LaunchFailed { reason: String },
+    /// A descriptor could not be captured from already-validated values.
+    DescriptorRejected { reason: String },
+}
+
+impl ChatRefusal {
+    /// The process exit code: 2 for a usage error, 1 for an operational
+    /// failure (Requirement 23.2, design §4.3).
+    fn code(&self) -> u8 {
+        match self {
+            ChatRefusal::UnknownOption { .. }
+            | ChatRefusal::SessionValueMissing
+            | ChatRefusal::MalformedSession
+            | ChatRefusal::MalformedModel => 2,
+            ChatRefusal::UnknownHarness { .. }
+            | ChatRefusal::HarnessNotInstalled { .. }
+            | ChatRefusal::SessionNotLive { .. }
+            | ChatRefusal::NoChatNumber { .. }
+            | ChatRefusal::NoDirectory
+            | ChatRefusal::DirectoryNotAbsolute { .. }
+            | ChatRefusal::DirectoryUnavailable { .. }
+            | ChatRefusal::BinaryUnresolved
+            | ChatRefusal::LaunchFailed { .. }
+            | ChatRefusal::DescriptorRejected { .. } => 1,
+        }
+    }
+
+    /// The one sentence printed after the `pitwall chat: ` prefix.
+    fn message(&self) -> String {
+        match self {
+            ChatRefusal::UnknownOption { entered } => format!("unknown option '{entered}'."),
+            ChatRefusal::SessionValueMissing => "--session needs a session ID".to_string(),
+            ChatRefusal::MalformedSession => "malformed session ID (refusing)".to_string(),
+            ChatRefusal::MalformedModel => "malformed model id (refusing)".to_string(),
+            ChatRefusal::UnknownHarness { harness } => {
+                format!("unknown agent '{harness}' in the configuration")
+            }
+            ChatRefusal::HarnessNotInstalled { harness } => {
+                format!("agent '{harness}' is not installed here")
+            }
+            ChatRefusal::SessionNotLive { session_id } => {
+                format!("session {session_id} is not live (refusing)")
+            }
+            ChatRefusal::NoChatNumber { reason } => reason.clone(),
+            ChatRefusal::NoDirectory => {
+                "no directory to open a chat in: HOME is unavailable and no observed \
+                 session has a project"
+                    .to_string()
+            }
+            ChatRefusal::DirectoryNotAbsolute { directory } => {
+                format!("refusing non-absolute chat directory: {directory}")
+            }
+            ChatRefusal::DirectoryUnavailable { directory } => {
+                format!("chat directory unavailable: {directory}")
+            }
+            ChatRefusal::BinaryUnresolved => {
+                "cannot resolve the running pitwall binary; not guessing one".to_string()
+            }
+            ChatRefusal::LaunchFailed { reason } => reason.clone(),
+            ChatRefusal::DescriptorRejected { reason } => reason.clone(),
+        }
+    }
+
+    /// Print the refusal on standard error and yield its exit code.
+    fn report(&self) -> ExitCode {
+        eprintln!("pitwall chat: {}", self.message());
+        ExitCode::from(self.code())
+    }
+}
+
+/// Steps 1-3 of the startup order (design §4.3): the option parse, the
+/// `--session` shape check, and the model check. Every refusal in this group
+/// is a usage error and exits 2 (9.4, 9.6, 11.7).
+///
+/// Pure and environment-free on purpose. The group that decides exit code 2
+/// must be answerable without a PATH scan, without an observation and without
+/// a terminal — which is both why it can run first and why the ordering is
+/// testable off-target. The model arrives as a parameter because this
+/// function must not read the config either: `cmd_chat` reads it once (11.1).
+///
+/// `Ok(None)` means no `--session` was given, which is a whole-workspace
+/// chat (9.3) rather than a missing argument.
+fn chat_usage_check(args: &[String], model: &str) -> Result<Option<String>, ChatRefusal> {
+    // Step 1: the established explicit-match parse. `chat` accepts exactly
+    // one option, so anything else is an unknown option (9.6).
+    let mut session: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--session" => {
+                i += 1;
+                match args.get(i) {
+                    Some(value) => session = Some(value.clone()),
+                    None => return Err(ChatRefusal::SessionValueMissing),
+                }
+            }
+            other => {
+                return Err(ChatRefusal::UnknownOption {
+                    entered: other.to_string(),
+                })
+            }
+        }
+        i += 1;
+    }
+
+    // Step 2: shape before anything looks the session up (9.4). Delegated to
+    // the one shape check in the tree, never re-implemented here.
+    if let Some(id) = session.as_deref() {
+        if !pitwall_lib::resume::is_session_id(id) {
+            return Err(ChatRefusal::MalformedSession);
+        }
+    }
+
+    // Step 3: the configured model. Empty means "agent default" and is
+    // legitimate; anything else must pass the existing validator (11.7).
+    if !model.is_empty() && !summary_mod::valid_model(model) {
+        return Err(ChatRefusal::MalformedModel);
+    }
+
+    Ok(session)
+}
+
+/// Step 4 of the startup order: the configured harness must be a known agent
+/// id and must be installed here. Both are operational failures and exit 1
+/// (11.6).
+///
+/// `installed` is a parameter rather than a PATH scan performed inside, so
+/// this stays pure and so the scan happens only after step 3 has passed.
+fn chat_harness_check(harness: &str, installed: bool) -> Result<(), ChatRefusal> {
+    if !pitwall_lib::agents::KNOWN.iter().any(|a| a.id == harness) {
+        return Err(ChatRefusal::UnknownHarness {
+            harness: harness.to_string(),
+        });
+    }
+    if !installed {
+        return Err(ChatRefusal::HarnessNotInstalled {
+            harness: harness.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Requirement 16.7's ordered chain, as a pure choice among candidates that
+/// have already been gathered: the context session's project directory, then
+/// the most recently active observed project directory, then `$HOME`.
+///
+/// Empty candidates are skipped — an observed project with no directory is
+/// not a directory. The chosen value is validated by
+/// [`chat_directory_check`] and is never quietly swapped for the next
+/// candidate when that validation fails: substituting a different directory
+/// is exactly what `resume` refuses to do (26.16), and a chat that silently
+/// opened somewhere else would be lying about its own scope.
+fn chat_directory_candidate(
+    scoped_dir: Option<&str>,
+    recent_dir: Option<&str>,
+    home: Option<&str>,
+) -> Option<String> {
+    [scoped_dir, recent_dir, home]
+        .into_iter()
+        .flatten()
+        .find(|dir| !dir.is_empty())
+        .map(str::to_string)
+}
+
+/// Absolute plus `is_dir()`, checked before any launch and before the
+/// descriptor is captured (16.7, 16.8).
+fn chat_directory_check(directory: &str) -> Result<(), ChatRefusal> {
+    if !directory.starts_with('/') {
+        return Err(ChatRefusal::DirectoryNotAbsolute {
+            directory: directory.to_string(),
+        });
+    }
+    if !std::fs::metadata(directory)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
+        return Err(ChatRefusal::DirectoryUnavailable {
+            directory: directory.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The most recently active observed project directory, chosen exactly the
+/// way `summarize` chooses its working directory.
+fn recent_project_dir(snapshot: &collector::WorkspaceSnapshot) -> Option<String> {
+    snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.project.is_some())
+        .max_by_key(|s| s.last_activity_epoch)
+        .and_then(|s| s.project.as_ref().map(|p| p.dir.clone()))
+}
+
+/// The relaunch argument vector: the absolute path of the running binary,
+/// the `chat` subcommand, and the already-validated `--session` when there
+/// is one.
+///
+/// Fixed-form by construction (16.6): two or four elements, none of them
+/// composed from anything but a validated value, and no shell anywhere. No
+/// `--title`, `--app-id` or window-class flag appears — the chat sets its own
+/// window title once it is running (16.5, 28.3).
+fn chat_relaunch_command(binary: &str, session: Option<&str>) -> Vec<String> {
+    let mut command = vec![binary.to_string(), "chat".to_string()];
+    if let Some(id) = session {
+        command.push("--session".to_string());
+        command.push(id.to_string());
+    }
+    command
+}
+
+/// Absolute path of the running `pitwall` binary, for the relaunch argv.
+///
+/// `terminal_argv` refuses a `command[0]` that is not absolute, so a bare
+/// `pitwall` would be rejected at the exec boundary rather than resolved
+/// through `PATH`. There is no honest fallback: if the running executable
+/// cannot be resolved, the relaunch is refused and named as such.
+fn current_binary_path() -> Result<String, ChatRefusal> {
+    let exe = std::env::current_exe().map_err(|_| ChatRefusal::BinaryUnresolved)?;
+    let text = exe.to_str().ok_or(ChatRefusal::BinaryUnresolved)?;
+    if !text.starts_with('/') {
+        return Err(ChatRefusal::BinaryUnresolved);
+    }
+    Ok(text.to_string())
+}
+
+/// One line per observed session in this chat's scope.
+///
+/// Deliberately **not** [`output::snapshot_to_text`]: that renders window
+/// addresses and pids, which Requirement 15.2 excludes from everything a chat
+/// presents. Agent evidence strings are excluded for the same reason (they
+/// carry pids), so an agent is named with its kind and the confidence the
+/// observation recorded, and nothing more (13.4). Every field here is one
+/// `state.json` already publishes.
+fn render_chat_sessions(snapshot: &collector::WorkspaceSnapshot) -> String {
+    if snapshot.sessions.is_empty() {
+        return "No sessions are observed in this chat's context.\n".to_string();
+    }
+    let mut out = format!(
+        "Observed sessions in this chat's context: {}\n",
+        snapshot.sessions.len()
+    );
+    for s in &snapshot.sessions {
+        let project = s
+            .project
+            .as_ref()
+            .map(|p| p.name.as_str())
+            .unwrap_or("no project");
+        let last = if s.last_activity_epoch < 0 {
+            "unknown".to_string()
+        } else {
+            chat::format_clock_utc(s.last_activity_epoch)
+        };
+        out.push_str(&format!(
+            "  {}  {}  {}  agent {} ({} confidence)  last activity {}\n",
+            s.id,
+            s.state.as_str(),
+            project,
+            s.agent.kind.as_str(),
+            s.agent.confidence.as_str(),
+            last
+        ));
+    }
+    out
+}
+
+/// Record one Pitwall turn and print it.
+///
+/// The human's own line is already on screen — the terminal echoed it as they
+/// typed — so only Pitwall's side is printed, while both sides are recorded in
+/// the in-memory conversation.
+fn say(conversation: &mut chat::Conversation, palette: chat::Palette, text: &str) {
+    conversation.record(chat::Role::Pitwall, chat::now_epoch(), text);
+    if let Some(turn) = conversation.turns().last() {
+        let _ = chat::print_turn(&mut std::io::stdout(), turn, palette);
+    }
+}
+
+/// The four informational entries of the closed vocabulary (design §5.4).
+///
+/// Each one prints what the chat already holds or can observe read-only.
+/// None of them invokes a harness and none of them can act: observation is
+/// side-effect free, and the acting bridge is not reachable from here
+/// (14.7, 14.8, 27.10).
+fn run_info_command(
+    plat: &dyn Platform,
+    d: &chat::ChatDescriptor,
+    cmd: chat::InfoCommand,
+    data_dir: &std::path::Path,
+    palette: chat::Palette,
+    conversation: &mut chat::Conversation,
+) {
+    match cmd {
+        chat::InfoCommand::Help => say(conversation, palette, &chat::render_vocabulary()),
+        chat::InfoCommand::Context => {
+            // The bounded document *is* what this chat can see, so it is what
+            // `/context` shows — the same artifact `summarize --dry-run`
+            // prints, bounded by the same ≤6 sessions, ≤20 events, ≤10
+            // checkpoints and ≤16 KB (12.2).
+            let observation = chat::observe(plat, d, data_dir);
+            let mut text = chat::context_block(d).join("\n");
+            if observation.truncated_sessions() > 0 {
+                text.push_str(&format!(
+                    "\n{} session(s) omitted to stay inside the bounded context.",
+                    observation.truncated_sessions()
+                ));
+            }
+            text.push('\n');
+            text.push_str(observation.document());
+            say(conversation, palette, &text);
+        }
+        chat::InfoCommand::Sessions => {
+            // Scoped by the same function the responder uses, so `/sessions`
+            // can never report a session the answers could not see (12.3,
+            // 12.4). The store rows are irrelevant to a session listing, so
+            // they are not read for one.
+            let scope = chat::scope_to_context(
+                d.context_session_id(),
+                collector::collect(plat),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            say(
+                conversation,
+                palette,
+                &render_chat_sessions(scope.snapshot()),
+            );
+        }
+        chat::InfoCommand::Clear => {
+            use std::io::Write as _;
+            // Clear the rendered conversation area and the in-memory turns,
+            // then put the identity back. Nothing was ever stored, so there
+            // is nothing else to undo (19.4, 19.5).
+            conversation.clear();
+            let mut out = std::io::stdout();
+            let _ = out.write_all(CLEAR_SCREEN.as_bytes());
+            let _ = out.write_all(chat::render_header(d, palette).as_bytes());
+            let _ = out.flush();
+            chat::assert_window_title(d);
+        }
+    }
+}
+
+/// The foreground input loop (design §4.6, §5.4) — step 7 of the startup
+/// order.
+///
+/// Returns on `/exit`, on EOF, and on a failed read (which is what a closed
+/// terminal window looks like from in here). All three are a normal end and
+/// the caller exits 0 (9.7). Nothing in this loop spawns a background process
+/// or a daemon (9.9).
+///
+/// Conversation turns live in the [`chat::Conversation`] value below and
+/// nowhere else: nothing here writes to the continuity database, to
+/// `state.json`, to a log or to the repository (15.6, 19.4), and the value is
+/// dropped when this function returns (19.5).
+///
+/// The dispatch table is exhaustive over [`chat::ChatInput`] by construction,
+/// so a future input class cannot slip through unhandled — and the acting arm
+/// is the only one that reaches [`chat::resume_action`] (14.10, 26.3, 27.1).
+fn chat_loop(plat: &dyn Platform, d: &chat::ChatDescriptor) {
+    let palette = chat::Palette::detect();
+    let data_dir = store::default_data_dir();
+    let db = data_dir.join(store::DB_FILENAME);
+    let mut conversation = chat::Conversation::new();
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+
+    loop {
+        let _ = chat::print_prompt(&mut std::io::stdout(), palette);
+        line.clear();
+        match stdin.read_line(&mut line) {
+            // EOF: the window closed, or piped input ran out.
+            Ok(0) => return,
+            Ok(_) => {}
+            // The terminal is gone; ending is the honest response and it is
+            // the same normal end.
+            Err(_) => return,
+        }
+
+        match chat::classify(&line) {
+            // Nothing was asked. Re-prompt without a word about it.
+            chat::ChatInput::Blank => {}
+            chat::ChatInput::Info(cmd) => {
+                run_info_command(plat, d, cmd, &data_dir, palette, &mut conversation);
+            }
+            // The only arm that may change workspace state, reached only
+            // because the human typed `/resume` themselves (26.2, 26.3).
+            chat::ChatInput::Act(chat::ActionCommand::Resume { target }) => {
+                let report = chat::resume_action(plat, &db, d, target.as_deref());
+                say(&mut conversation, palette, &chat::resume_line(&report));
+            }
+            chat::ChatInput::End => return,
+            chat::ChatInput::Unknown { entered } => {
+                say(
+                    &mut conversation,
+                    palette,
+                    &chat::unknown_command_message(&entered),
+                );
+            }
+            chat::ChatInput::Question(question) => {
+                conversation.record(chat::Role::You, chat::now_epoch(), question.text());
+                // Observe, then answer. `respond` receives no platform, no
+                // database and no resume handle, so the question path cannot
+                // reach an action whatever the answer says (27.1, 27.3).
+                let observation = chat::observe(plat, d, &data_dir);
+                let answer = match chat::respond(d, &observation, &question) {
+                    Ok(answer) => answer,
+                    Err(e) => e.message(),
+                };
+                say(&mut conversation, palette, &answer);
+            }
+            // Refused rather than truncated, and the chat stays ready.
+            chat::ChatInput::QuestionTooLong { chars } => {
+                say(
+                    &mut conversation,
+                    palette,
+                    &format!(
+                        "that question is {chars} characters; the limit is {}. \
+                         Trim it and ask again — nothing was sent.",
+                        chat::MAX_CHAT_QUESTION_CHARS
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// `pitwall chat [--session <session-id>]` — one native Pitwall Chat in the
+/// foreground of its own terminal (Requirement 9, design §4.2/§4.3).
+///
+/// Two shapes, one code path:
+///
+/// - **stdout is not a TTY** — this invocation has nowhere to talk (the panel
+///   runs it from a `Process` with fixed argv), so it opens one native
+///   Omarchy terminal running the same subcommand through the single
+///   Terminal_Launch_Path and exits 0 (16.1, 16.6, 28.1, 28.2, 28.6);
+/// - **stdout is a TTY** — it runs the chat loop right there in the
+///   foreground, with no background process and no daemon (9.9).
+///
+/// Every documented refusal is decided *before* either shape begins, so a
+/// refusal reaches the caller's standard error with the right exit code
+/// instead of flashing past in a terminal window nobody was watching. On
+/// every refusal path no terminal is opened, no harness is invoked, no
+/// context file is written, and no chat number is claimed.
+fn cmd_chat(args: &[String]) -> ExitCode {
+    // The one config read (11.1, 11.4). `chat.rs` has none, so these two
+    // values are this chat's harness and model for its whole life however
+    // often `pitwall config set` runs afterwards.
+    let cfg = pitwall_lib::config::load_from(&pitwall_lib::config::config_path());
+
+    // Steps 1-3 — usage class, exit 2. Nothing environmental yet.
+    let session = match chat_usage_check(args, &cfg.model) {
+        Ok(session) => session,
+        Err(refusal) => return refusal.report(),
+    };
+
+    // Step 4 — harness known and installed, exit 1. Read-only PATH scan.
+    let installed = pitwall_lib::agents::discover_in(&pitwall_lib::agents::path_dirs())
+        .into_iter()
+        .any(|a| a.id == cfg.agent.as_str() && a.path.is_some());
+    if let Err(refusal) = chat_harness_check(&cfg.agent, installed) {
+        return refusal.report();
+    }
+
+    // Step 5 — session liveness, exit 1. One observation serves the liveness
+    // check, the Context_Label, the working directory and the numbers the
+    // allocator must avoid.
+    let plat = platform();
+    let snapshot = collector::collect(&plat);
+    let scoped = match session.as_deref() {
+        None => None,
+        Some(id) => match snapshot.sessions.iter().find(|s| s.id == id) {
+            Some(found) => Some(found),
+            None => {
+                return ChatRefusal::SessionNotLive {
+                    session_id: id.to_string(),
+                }
+                .report()
+            }
+        },
+    };
+
+    // The working directory (16.7): the ordered chain, then one validation,
+    // with no substitution when that validation fails.
+    let project = scoped.and_then(|s| s.project.as_ref());
+    let home = std::env::var("HOME").ok();
+    let recent = recent_project_dir(&snapshot);
+    let scoped_dir = project.map(|p| p.dir.as_str());
+    let candidate = chat_directory_candidate(scoped_dir, recent.as_deref(), home.as_deref());
+    let directory = match candidate {
+        Some(directory) => directory,
+        None => return ChatRefusal::NoDirectory.report(),
+    };
+    if let Err(refusal) = chat_directory_check(&directory) {
+        return refusal.report();
+    }
+
+    // Task 12.2 — the Chat_Launcher. Not a TTY: open one native terminal
+    // through the *single* launch path and end. Nothing has been created at
+    // this point, so a launch failure leaves no chat entry behind (16.8), and
+    // the relaunched process runs this very function again on the other side
+    // of the fork, where stdout is a terminal.
+    if !std::io::stdout().is_terminal() {
+        let binary = match current_binary_path() {
+            Ok(binary) => binary,
+            Err(refusal) => return refusal.report(),
+        };
+        let command = chat_relaunch_command(&binary, session.as_deref());
+        return match plat.launch_terminal(&TerminalSpec {
+            directory: &directory,
+            command: &command,
+        }) {
+            Ok(()) => {
+                println!("chat: opened a Pitwall Chat terminal in {directory}");
+                ExitCode::SUCCESS
+            }
+            Err(reason) => ChatRefusal::LaunchFailed { reason }.report(),
+        };
+    }
+
+    // Step 6 — the chat number, derived from what is running and from nothing
+    // stored (10.2, 10.4): the numbers of chat-classified windows in this
+    // observation, plus the live leases. The guard releases the number at
+    // `/exit` and by `Drop` on every other path out of this function.
+    let observed_numbers: Vec<u16> = snapshot
+        .sessions
+        .iter()
+        .filter_map(|s| s.chat.as_ref().map(|c| c.number))
+        .collect();
+    let leases = plat.chat_leases();
+    let processes = plat.processes();
+    let mut lease = match chat::allocate_chat_number(&observed_numbers, &leases, &processes) {
+        Ok(lease) => lease,
+        Err(reason) => return ChatRefusal::NoChatNumber { reason }.report(),
+    };
+
+    // Reclaim ephemeral context files left behind by chats that died
+    // abnormally (12.8, 15.7). Conservative by construction: an empty
+    // observation sweeps nothing, and a live chat's file is never touched.
+    let swept = pitwall_lib::context::sweep_orphans(&processes);
+    if swept > 0 {
+        eprintln!("pitwall chat: reclaimed {swept} orphaned context file(s)");
+    }
+
+    // Capture the identity once. Every value below was validated above, so
+    // this cannot fail for a reason the human has not already been told
+    // about — and it is the last word on the harness, the model, the label,
+    // the context session and the start time (11.2, 11.3).
+    let context_label = chat::context_label_for(project.map(|p| p.name.as_str()));
+    let descriptor = match chat::ChatDescriptor::capture(
+        lease.number(),
+        &cfg.agent,
+        &cfg.model,
+        &context_label,
+        session.as_deref(),
+        chat::now_epoch(),
+        &directory,
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(reason) => return ChatRefusal::DescriptorRejected { reason }.report(),
+    };
+
+    // Step 7 — claim the window identity, then talk. The title goes out
+    // before the header so the window switcher is correct from the first
+    // frame (16.2, 16.5).
+    chat::assert_window_title(&descriptor);
+    chat::show_header(&plat, &descriptor);
+    chat_loop(&plat, &descriptor);
+
+    // Explicit release, then `Drop` finds nothing left to do (9.7).
+    lease.release();
+    ExitCode::SUCCESS
+}
+
 /// List supported agents with detection evidence (read-only PATH scan).
 fn cmd_agents() -> ExitCode {
     use pitwall_lib::agents::{Availability, ModelDiscovery};
@@ -917,7 +1563,7 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-    match summary_mod::run_agent(&argv, std::time::Duration::from_secs(timeout_secs)) {
+    match summary_mod::run_agent(&argv, None, std::time::Duration::from_secs(timeout_secs)) {
         Ok(raw) => {
             let text = summary_mod::extract_summary_text(&raw);
             ctx.close();
@@ -1215,6 +1861,7 @@ fn main() -> ExitCode {
         Some("snapshot") => cmd_snapshot(&args[1..]),
         Some("checkpoint") => cmd_checkpoint(&args[1..]),
         Some("resume") => cmd_resume(&args[1..]),
+        Some("chat") => cmd_chat(&args[1..]),
         Some("agents") => cmd_agents(),
         Some("models") => cmd_models(&args[1..]),
         Some("summarize") => cmd_summarize(&args[1..]),
@@ -1226,5 +1873,358 @@ fn main() -> ExitCode {
             eprintln!("pitwall: unknown subcommand '{other}'. Run `pitwall --help`.");
             ExitCode::from(2)
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A well-shaped Pitwall-local session id: `sess_` + 16 lowercase hex.
+    const LIVE_ID: &str = "sess_0123456789abcdef";
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// A refusal is one printable line: never empty, never multi-line.
+    fn assert_one_line(refusal: &ChatRefusal) {
+        let message = refusal.message();
+        assert!(!message.trim().is_empty(), "{refusal:?}");
+        assert!(!message.contains('\n'), "{refusal:?}");
+    }
+
+    // --- step 1: the option parse (9.6) ------------------------------------
+
+    #[test]
+    fn unknown_option_is_a_usage_error() {
+        let refusal = chat_usage_check(&argv(&["--nope"]), "").unwrap_err();
+        assert_eq!(
+            refusal,
+            ChatRefusal::UnknownOption {
+                entered: "--nope".to_string(),
+            }
+        );
+        assert_eq!(refusal.code(), 2);
+    }
+
+    #[test]
+    fn a_positional_argument_is_an_unknown_option() {
+        let refusal = chat_usage_check(&argv(&[LIVE_ID]), "").unwrap_err();
+        assert_eq!(refusal.code(), 2);
+    }
+
+    #[test]
+    fn session_without_a_value_is_refused_not_widened_to_the_workspace() {
+        let refusal = chat_usage_check(&argv(&["--session"]), "").unwrap_err();
+        assert_eq!(refusal, ChatRefusal::SessionValueMissing);
+        assert_eq!(refusal.code(), 2);
+    }
+
+    #[test]
+    fn no_options_means_a_whole_workspace_chat() {
+        assert_eq!(chat_usage_check(&argv(&[]), "").unwrap(), None);
+    }
+
+    // --- step 2: the `--session` shape (9.4) -------------------------------
+
+    #[test]
+    fn malformed_session_exits_two() {
+        let bad = ["nope", "sess_", "sess_0123", "sess_0123456789ABCDEF", "0123"];
+        for entered in bad {
+            let args = argv(&["--session", entered]);
+            let refusal = chat_usage_check(&args, "").unwrap_err();
+            assert_eq!(refusal, ChatRefusal::MalformedSession, "for {entered:?}");
+            assert_eq!(refusal.code(), 2, "for {entered:?}");
+        }
+    }
+
+    #[test]
+    fn well_shaped_session_is_carried_through() {
+        let args = argv(&["--session", LIVE_ID]);
+        assert_eq!(
+            chat_usage_check(&args, "").unwrap(),
+            Some(LIVE_ID.to_string())
+        );
+    }
+
+    // --- step 3: the model (11.7) ------------------------------------------
+
+    #[test]
+    fn malformed_model_exits_two() {
+        let refusal = chat_usage_check(&argv(&[]), "no slash here").unwrap_err();
+        assert_eq!(refusal, ChatRefusal::MalformedModel);
+        assert_eq!(refusal.code(), 2);
+    }
+
+    #[test]
+    fn empty_model_is_the_agent_default_and_passes() {
+        assert!(chat_usage_check(&argv(&[]), "").is_ok());
+    }
+
+    #[test]
+    fn valid_model_passes() {
+        assert!(chat_usage_check(&argv(&[]), "openrouter/gpt-4o").is_ok());
+    }
+
+    #[test]
+    fn the_session_shape_is_checked_before_the_model() {
+        // Both are usage errors, so the exit code cannot tell them apart; the
+        // refusal identity can, and it must be the earlier stage's.
+        let args = argv(&["--session", "nope"]);
+        let refusal = chat_usage_check(&args, "no slash").unwrap_err();
+        assert_eq!(refusal, ChatRefusal::MalformedSession);
+    }
+
+    #[test]
+    fn an_unknown_option_is_refused_before_the_session_shape() {
+        let args = argv(&["--nope", "--session", "bad"]);
+        let refusal = chat_usage_check(&args, "").unwrap_err();
+        assert!(matches!(refusal, ChatRefusal::UnknownOption { .. }));
+    }
+
+    // --- step 4: the harness (11.6) ----------------------------------------
+
+    #[test]
+    fn unknown_harness_is_operational() {
+        let refusal = chat_harness_check("nosuchagent", true).unwrap_err();
+        assert_eq!(
+            refusal,
+            ChatRefusal::UnknownHarness {
+                harness: "nosuchagent".to_string(),
+            }
+        );
+        assert_eq!(refusal.code(), 1);
+    }
+
+    #[test]
+    fn absent_harness_is_operational() {
+        let refusal = chat_harness_check("opencode", false).unwrap_err();
+        assert_eq!(
+            refusal,
+            ChatRefusal::HarnessNotInstalled {
+                harness: "opencode".to_string(),
+            }
+        );
+        assert_eq!(refusal.code(), 1);
+    }
+
+    #[test]
+    fn known_and_installed_harness_passes() {
+        for known in pitwall_lib::agents::KNOWN {
+            assert!(chat_harness_check(known.id, true).is_ok(), "{}", known.id);
+        }
+    }
+
+    /// The load-bearing ordering claim of design §4.3: `cmd_chat` runs
+    /// [`chat_usage_check`] before [`chat_harness_check`], so a malformed
+    /// `--session` decides both the refusal and the exit code even when the
+    /// configured harness is also missing. Composed here in that same order.
+    #[test]
+    fn usage_refusals_precede_operational_ones() {
+        let args = argv(&["--session", "nope"]);
+        let first = chat_usage_check(&args, "no slash").unwrap_err();
+        assert_eq!(first, ChatRefusal::MalformedSession);
+        assert_eq!(first.code(), 2);
+        // Had the harness stage run first, the process would have exited 1.
+        let harness = chat_harness_check("opencode", false).unwrap_err();
+        assert_eq!(harness.code(), 1);
+    }
+
+    // --- the exit-code contract as a whole (23.2) --------------------------
+
+    #[test]
+    fn usage_class_refusals_all_exit_two() {
+        let usage = [
+            ChatRefusal::UnknownOption {
+                entered: "--x".to_string(),
+            },
+            ChatRefusal::SessionValueMissing,
+            ChatRefusal::MalformedSession,
+            ChatRefusal::MalformedModel,
+        ];
+        for refusal in usage {
+            assert_eq!(refusal.code(), 2, "{refusal:?}");
+            assert_one_line(&refusal);
+        }
+    }
+
+    #[test]
+    fn operational_refusals_all_exit_one() {
+        let operational = [
+            ChatRefusal::UnknownHarness {
+                harness: "nosuchagent".to_string(),
+            },
+            ChatRefusal::HarnessNotInstalled {
+                harness: "opencode".to_string(),
+            },
+            ChatRefusal::SessionNotLive {
+                session_id: LIVE_ID.to_string(),
+            },
+            ChatRefusal::NoChatNumber {
+                reason: "all chat numbers 001..999 are in use (refusing)".to_string(),
+            },
+            ChatRefusal::NoDirectory,
+            ChatRefusal::DirectoryNotAbsolute {
+                directory: "relative".to_string(),
+            },
+            ChatRefusal::DirectoryUnavailable {
+                directory: "/nope".to_string(),
+            },
+            ChatRefusal::BinaryUnresolved,
+            ChatRefusal::LaunchFailed {
+                reason: "terminal launch failed".to_string(),
+            },
+            ChatRefusal::DescriptorRejected {
+                reason: "refusing empty context label".to_string(),
+            },
+        ];
+        for refusal in operational {
+            assert_eq!(refusal.code(), 1, "{refusal:?}");
+            assert_one_line(&refusal);
+        }
+    }
+
+    #[test]
+    fn refusals_name_a_malformed_value_by_class_not_by_echo() {
+        // A hostile `--session` or model value never reaches the terminal
+        // through a refusal line, because neither line carries it.
+        assert_eq!(
+            ChatRefusal::MalformedSession.message(),
+            "malformed session ID (refusing)"
+        );
+        assert_eq!(
+            ChatRefusal::MalformedModel.message(),
+            "malformed model id (refusing)"
+        );
+    }
+
+    // --- the working-directory chain (16.7) -------------------------------
+
+    #[test]
+    fn directory_chain_prefers_the_scoped_project() {
+        let chosen = chat_directory_candidate(Some("/scoped"), Some("/recent"), Some("/home/x"));
+        assert_eq!(chosen, Some("/scoped".to_string()));
+    }
+
+    #[test]
+    fn directory_chain_falls_back_to_the_most_recent_project() {
+        let chosen = chat_directory_candidate(None, Some("/recent"), Some("/home/x"));
+        assert_eq!(chosen, Some("/recent".to_string()));
+    }
+
+    #[test]
+    fn directory_chain_falls_back_to_home() {
+        let chosen = chat_directory_candidate(None, None, Some("/home/x"));
+        assert_eq!(chosen, Some("/home/x".to_string()));
+    }
+
+    #[test]
+    fn directory_chain_skips_empty_candidates() {
+        let chosen = chat_directory_candidate(Some(""), Some(""), Some("/home/x"));
+        assert_eq!(chosen, Some("/home/x".to_string()));
+        assert_eq!(chat_directory_candidate(Some(""), None, Some("")), None);
+    }
+
+    #[test]
+    fn no_candidate_at_all_is_refused() {
+        assert_eq!(chat_directory_candidate(None, None, None), None);
+        assert_eq!(ChatRefusal::NoDirectory.code(), 1);
+    }
+
+    #[test]
+    fn directory_check_refuses_a_relative_path_and_names_it() {
+        let refusal = chat_directory_check("relative/dir").unwrap_err();
+        assert_eq!(
+            refusal,
+            ChatRefusal::DirectoryNotAbsolute {
+                directory: "relative/dir".to_string(),
+            }
+        );
+        // The offending path is named, never substituted (16.8, 26.16).
+        assert!(refusal.message().contains("relative/dir"));
+    }
+
+    #[test]
+    fn directory_check_refuses_a_missing_directory_and_names_it() {
+        let missing = "/pitwall-does-not-exist-9f3a1c";
+        let refusal = chat_directory_check(missing).unwrap_err();
+        assert_eq!(
+            refusal,
+            ChatRefusal::DirectoryUnavailable {
+                directory: missing.to_string(),
+            }
+        );
+        assert!(refusal.message().contains(missing));
+    }
+
+    #[test]
+    fn directory_check_accepts_an_existing_absolute_directory() {
+        assert!(chat_directory_check("/").is_ok());
+    }
+
+    #[test]
+    fn directory_check_refuses_a_path_that_is_not_a_directory() {
+        // Present on every Unix, and a file rather than a directory.
+        assert!(chat_directory_check("/etc/hosts").is_err());
+    }
+
+    // --- the relaunch argv (16.6, 28.3) -----------------------------------
+
+    #[test]
+    fn relaunch_command_is_the_binary_the_subcommand_and_the_session() {
+        let command = chat_relaunch_command("/usr/local/bin/pitwall", Some(LIVE_ID));
+        let expected = argv(&["/usr/local/bin/pitwall", "chat", "--session", LIVE_ID]);
+        assert_eq!(command, expected);
+    }
+
+    #[test]
+    fn relaunch_command_without_a_session_is_two_elements() {
+        let command = chat_relaunch_command("/usr/local/bin/pitwall", None);
+        assert_eq!(command, argv(&["/usr/local/bin/pitwall", "chat"]));
+    }
+
+    #[test]
+    fn relaunch_command_names_no_emulator_and_passes_no_identity_flag() {
+        let command = chat_relaunch_command("/usr/local/bin/pitwall", Some(LIVE_ID));
+        let forbidden = ["--app-id", "--class", "--title", "--hold", "foot", "kitty"];
+        for element in &command {
+            for bad in forbidden {
+                assert_ne!(element.as_str(), bad, "{element} must not be in the argv");
+            }
+        }
+        // `command[0]` must be absolute: `terminal_argv` refuses anything else.
+        assert!(command[0].starts_with('/'));
+    }
+
+    #[test]
+    fn the_running_binary_resolves_to_an_absolute_path() {
+        // The test binary is a real executable, so this exercises the same
+        // resolution the relaunch performs.
+        let path = current_binary_path().expect("the test binary has a path");
+        assert!(path.starts_with('/'));
+    }
+
+    // --- `/sessions` presentation (13.4, 15.2) ----------------------------
+
+    #[test]
+    fn session_listing_is_honest_when_nothing_is_observed() {
+        let snapshot = collector::WorkspaceSnapshot {
+            schema_version: 1,
+            collected_at_epoch: 0,
+            hostname: "testbox".to_string(),
+            sessions: Vec::new(),
+        };
+        let text = render_chat_sessions(&snapshot);
+        assert!(text.contains("No sessions are observed"));
+        assert!(text.ends_with('\n'));
+    }
+
+    // --- `/clear` -----------------------------------------------------------
+
+    #[test]
+    fn the_clear_sequence_is_exactly_erase_and_home() {
+        assert_eq!(CLEAR_SCREEN, "\u{1b}[2J\u{1b}[H");
     }
 }

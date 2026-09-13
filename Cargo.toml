@@ -23,6 +23,9 @@ path = "src/lib.rs"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
+# Property-based test runner. Test-only: never linked into the shipped binary.
+# Pinned exactly so property runs are reproducible across machines and CI.
+proptest = "=1.5.0"
 
 [profile.release]
 lto = true

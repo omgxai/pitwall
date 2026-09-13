@@ -13,6 +13,7 @@
 
 use crate::context::EphemeralContext;
 use std::io::Read as _;
+use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
@@ -93,13 +94,57 @@ pub fn build_argv(
 
 /// Run the agent with a timeout, capturing stdout. Kills on expiry.
 /// No shell at any point; `argv[0]` is the binary, the rest fixed flags.
-pub fn run_agent(argv: &[String], timeout: Duration) -> Result<String, String> {
+///
+/// `stdin_payload` is the *only* channel for content that must not appear in
+/// argv: argv is world-readable through `/proc`, a pipe is not. Harnesses
+/// that take the bounded context document on stdin (`claude -p`,
+/// `codex exec`) get it here; the `opencode` summary/assign paths pass
+/// `None`.
+///
+/// `None` is byte-identical to the pre-M8 runner: the same argv, the same
+/// `Stdio::null()` stdin disposition, the same timeout and kill semantics,
+/// and no stdin handle to write to or close (Requirement 23.1). Only a
+/// `Some` payload switches stdin to a pipe.
+///
+/// Two failure modes are handled deliberately for the `Some` path:
+///
+/// 1. **EOF.** The write handle is dropped as soon as the payload is
+///    written, which closes the child's stdin. Harnesses that read stdin to
+///    completion (`codex exec` documented among them) never see EOF on a
+///    pipe that stays open and hang until the deadline — that would make the
+///    timeout-and-kill branch the normal path instead of the exceptional one.
+/// 2. **Deadlock.** Writing to a child's stdin while it writes to stdout can
+///    deadlock if both pipe buffers fill: the writer blocks because the child
+///    is not draining, the child blocks because nobody is draining its
+///    stdout. Stdout is therefore drained on its own thread (as before) and
+///    the payload is written on a *second* thread, so the wait loop below is
+///    never blocked by either pipe and the deadline plus kill stays the only
+///    bound on the run. A child that reads no stdin at all is killed on
+///    expiry exactly like any other hung agent, and the kill closes the read
+///    end so the writer thread unblocks with `EPIPE` and is joined.
+///
+///    `SummaryContext` caps the context document at 16 KB, which is under a
+///    typical 64 KB pipe buffer, so in practice the write would complete
+///    without any draining at all. That is an assumption about the platform's
+///    buffer size, stated here rather than silently relied on: the threading
+///    above is correct for any payload size.
+pub fn run_agent(
+    argv: &[String],
+    stdin_payload: Option<&str>,
+    timeout: Duration,
+) -> Result<String, String> {
     if argv.is_empty() {
         return Err("empty argv (refusing)".to_string());
     }
+    let stdin_cfg = match stdin_payload {
+        // A pipe only when there is something to deliver; otherwise the
+        // pre-existing null disposition, unchanged.
+        Some(_) => std::process::Stdio::piped(),
+        None => std::process::Stdio::null(),
+    };
     let mut child = std::process::Command::new(&argv[0])
         .args(&argv[1..])
-        .stdin(std::process::Stdio::null())
+        .stdin(stdin_cfg)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -112,13 +157,49 @@ pub fn run_agent(argv: &[String], timeout: Duration) -> Result<String, String> {
         }
         buf
     });
+    // Payload delivery: its own thread, started once stdout is already being
+    // drained (see the deadlock note above). `None` creates no thread and
+    // takes no handle, leaving the pre-M8 path untouched.
+    let writer = match stdin_payload {
+        Some(payload) => {
+            let mut sink = match child.stdin.take() {
+                Some(sink) => sink,
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return Err("agent stdin unavailable (refusing)".to_string());
+                }
+            };
+            let bytes = payload.as_bytes().to_vec();
+            Some(std::thread::spawn(move || {
+                let mut written = sink.write_all(&bytes);
+                if written.is_ok() {
+                    written = sink.flush();
+                }
+                // Explicit close so the child sees EOF, on the error path
+                // too: a harness reading stdin to completion never returns
+                // while the pipe stays open, which would turn the timeout
+                // branch into the normal path.
+                drop(sink);
+                written.map_err(|e| e.to_string())
+            }))
+        }
+        None => None,
+    };
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let raw = reader.join().unwrap_or_default();
+                let stdin_err = join_stdin_writer(writer);
                 if !status.success() {
                     return Err(format!("agent exited {}", status));
+                }
+                if let Some(e) = stdin_err {
+                    // The agent answered without the context it was given,
+                    // so the answer is not evidence-based: refuse it.
+                    return Err(format!("agent stdin write failed: {e}"));
                 }
                 return Ok(String::from_utf8_lossy(&raw).into_owned());
             }
@@ -127,6 +208,7 @@ pub fn run_agent(argv: &[String], timeout: Duration) -> Result<String, String> {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = reader.join();
+                    let _ = join_stdin_writer(writer);
                     return Err(format!("agent timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -135,9 +217,24 @@ pub fn run_agent(argv: &[String], timeout: Duration) -> Result<String, String> {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = reader.join();
+                let _ = join_stdin_writer(writer);
                 return Err(format!("agent wait failed: {e}"));
             }
         }
+    }
+}
+
+/// Collect the stdin writer thread's outcome, if there was one. Returns the
+/// failure text, or `None` when the payload was delivered (or when there was
+/// no payload at all). Joining is safe on every branch: the child's death
+/// closes the read end, so a blocked `write_all` returns `EPIPE`.
+fn join_stdin_writer(
+    writer: Option<std::thread::JoinHandle<Result<(), String>>>,
+) -> Option<String> {
+    match writer?.join() {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e),
+        Err(_) => Some("stdin writer panicked".to_string()),
     }
 }
 
@@ -247,7 +344,9 @@ pub fn summarize_with_context(
         .ok_or_else(|| "context has no path".to_string())?;
     let result = (|| {
         let argv = build_argv(agent, model, dir, &ctx_path, opencode_bin)?;
-        let raw = run_agent(&argv, timeout)?;
+        // opencode takes the context as a `-f` file, so no stdin payload:
+        // `None` keeps this path identical to pre-M8 (23.1).
+        let raw = run_agent(&argv, None, timeout)?;
         Ok::<String, String>(extract_summary_text(&raw))
     })();
     ctx.close();
@@ -397,7 +496,7 @@ mod tests {
         let dir = sandbox();
         let bin = fake_agent(&dir, "#!/bin/sh\nsleep 30\n");
         let argv = vec![bin.to_string_lossy().into_owned()];
-        let err = run_agent(&argv, Duration::from_millis(300)).unwrap_err();
+        let err = run_agent(&argv, None, Duration::from_millis(300)).unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         // No stray sleepers from the kill path.
         let _ = std::fs::remove_dir_all(&dir);
@@ -408,8 +507,47 @@ mod tests {
         let dir = sandbox();
         let bin = fake_agent(&dir, "#!/bin/sh\necho boom >&2\nexit 3\n");
         let argv = vec![bin.to_string_lossy().into_owned()];
-        let err = run_agent(&argv, Duration::from_secs(5)).unwrap_err();
+        let err = run_agent(&argv, None, Duration::from_secs(5)).unwrap_err();
         assert!(err.contains("exited"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_payload_keeps_stdin_null_and_never_hangs() {
+        let dir = sandbox();
+        // Prints a marker, then echoes whatever stdin holds. With the
+        // pre-M8 null disposition preserved, stdin is empty and `cat`
+        // returns at once — a hang here would surface as a timeout error.
+        let bin = fake_agent(&dir, "#!/bin/sh\necho START\ncat\n");
+        let argv = vec![bin.to_string_lossy().into_owned()];
+        let raw = run_agent(&argv, None, Duration::from_secs(10)).unwrap();
+        assert_eq!(raw, "START\n", "None must deliver nothing on stdin: {raw:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn payload_reaches_child_stdin_and_reaches_eof() {
+        let dir = sandbox();
+        let bin = fake_agent(&dir, "#!/bin/sh\necho START\ncat\n");
+        let argv = vec![bin.to_string_lossy().into_owned()];
+        // `cat` only terminates on EOF, so an Ok result with the payload
+        // echoed back proves both delivery and the stdin close.
+        let raw = run_agent(&argv, Some("PAYLOAD-LINE\n"), Duration::from_secs(10)).unwrap();
+        assert_eq!(raw, "START\nPAYLOAD-LINE\n", "{raw:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn large_payload_does_not_deadlock_against_stdout() {
+        let dir = sandbox();
+        // Echoes the payload straight back, so both pipes are in flight at
+        // once. Well beyond a 64 KB pipe buffer: without concurrent stdout
+        // draining this deadlocks until the timeout kills the child.
+        let bin = fake_agent(&dir, "#!/bin/sh\ncat\n");
+        let argv = vec![bin.to_string_lossy().into_owned()];
+        let payload = "x".repeat(128 * 1024);
+        let raw = run_agent(&argv, Some(&payload), Duration::from_secs(20)).unwrap();
+        assert_eq!(raw.len(), payload.len(), "short read: {} bytes", raw.len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

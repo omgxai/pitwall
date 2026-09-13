@@ -18,6 +18,11 @@ Column {
   // Session object (live) or resumable checkpoint entry.
   property var entry: null
   property bool resumable: false
+  // Normalised chat facts for a Pitwall Chat entry (StateReader.chatOf), or
+  // null for every ordinary session. Parent-supplied on purpose: the bar
+  // renders facts, it never parses the artifact and never infers a chat.
+  property var chatFacts: null
+  readonly property bool isChat: chatFacts !== null && chatFacts !== undefined
   // 0..1 duration fraction (parent scales logarithmically, bounded).
   property real frac: 0.15
   property bool selected: false
@@ -113,6 +118,21 @@ Column {
     var b = (entry && entry.branch) || (entry && entry.project && entry.project.branch) || ""
     return b ? ":" + b : ""
   }
+  // Observed state in the existing vocabulary, the same words the detail
+  // card uses: active = running now, idle = sleeping, waiting = stopped job
+  // present, unknown = unclear. Derived from the session record's own state
+  // field only (18.8) — nothing here is inferred.
+  readonly property string stateWord: {
+    if (stateKey === "running") return "active"
+    if (stateKey === "sleeping") return "idle"
+    if (stateKey === "stopped") return "waiting"
+    return "unknown"
+  }
+  // State as shape, not colour: filled = running, hollow = any other
+  // observed state. U+25CF/U+25CB are the dots already shipped in this panel
+  // (confidence glyph below, unread badge, brief status), so the chat region
+  // introduces no codepoint of its own (18.4, gate 1.3).
+  readonly property string stateGlyph: stateKey === "running" ? "●" : "○"
   // Confidence glyph (verified codepoints only): filled = strong,
   // hollow = medium, ? = uncertain. Always paired with text/tooltip.
   readonly property string confGlyph: {
@@ -129,6 +149,24 @@ Column {
     return Color.muted
   }
   readonly property string labelText: {
+    // Chat entry: same single-row label as every other bar, carrying the
+    // literal `Pitwall Chat`, the Chat_Number, the Harness, the Model (or the
+    // agent-default label StateReader already resolved) and the
+    // Context_Label, closed by the observed state word (18.2, 18.3). Order
+    // follows the reference: identity first, configuration next, state last.
+    // Empty facts are dropped rather than filled in — an absent context label
+    // must not become an invented one.
+    if (isChat) {
+      var seg = [stateGlyph + " Pitwall Chat " + String(chatFacts.number || "")]
+      var harness = String(chatFacts.harness || "")
+      if (harness !== "") seg.push(harness)
+      var modelLabel = String(chatFacts.model_label || "")
+      if (modelLabel !== "") seg.push(modelLabel)
+      var ctx = String(chatFacts.context_label || "")
+      if (ctx !== "") seg.push(ctx)
+      seg.push(stateWord)
+      return seg.join(" · ") + (selected ? "  ▴" : "  ▾")
+    }
     var kind = agentKind
     if (kind === "unknown") {
       var role = String((entry && entry.role) || "unknown")
@@ -186,7 +224,12 @@ Column {
       text: root.labelText
       color: root.selected ? Color.foreground : Qt.darker(Color.foreground, 1.15)
       font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
+      // One weight step down for chat entries, matching the caption-weight
+      // chat group row above them (18.5). Same tokens, same row form; the
+      // block height is fixed, so the smaller line only leaves more air
+      // above the track. The region's opacity lives on the parent wrapper,
+      // deliberately not doubled up here.
+      font.pixelSize: root.isChat ? Style.font.caption : Style.font.bodySmall
       renderType: Text.NativeRendering
     }
 

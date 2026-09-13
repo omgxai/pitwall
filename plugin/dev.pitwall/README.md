@@ -36,8 +36,15 @@ all detection lives in the Rust daemon/CLI, never in QML.
   (`hyprctl dispatch` is unusable from shell widgets in this environment —
   its Lua shorthand rejects multi-token calls; native activation is also
   the first-party mechanism.)
-- Glyphs verified present in the installed font via `fc-query` charset:
-  U+25CF/25CB (dots), U+F034E (focus). No other codepoints assumed.
+- Glyphs: no codepoint enters the plugin until it is verified present in the
+  installed font (`fc-query` charset) or already proven by the shipped,
+  screenshot-verified panel. Current coverage — Nerd PUA: U+F013 gear,
+  U+F024 flag (`pitwall-native` tier, also the Chat Sessions region),
+  U+F007 user (`agents`), U+F07B folder (`workspace`), U+F0AD wrench
+  (`system`), U+F0450 refresh, U+F034E focus action, U+F0140/U+F0142
+  chevrons. BMP: U+25CF/25CB dots, U+2713, U+2022, U+2715, U+25A0, U+25B6,
+  U+25B4/25BE, U+00B7, U+2014, U+2026, U+2192. Nothing outside this set is
+  assumed, and no colour emoji is used.
 
 ## Identity
 

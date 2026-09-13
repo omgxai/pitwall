@@ -14,7 +14,7 @@
 
 use crate::collector::WorkspaceSnapshot;
 use crate::output::escape;
-use crate::platform::{IoCounters, Platform, TerminalText};
+use crate::platform::{IoCounters, Platform, RawProcess, TerminalText};
 use crate::store::{Checkpoint, PrevSession};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -465,7 +465,10 @@ fn str_list(items: &[String]) -> String {
 /// then most recent activity. Deterministic (id tiebreak).
 fn session_priority(s: &crate::collector::TerminalSession) -> (u8, i64, String) {
     let role_rank = match s.role {
-        crate::collector::WindowRole::Terminal => 0,
+        // A chat window *is* a terminal session, so it ranks with terminals.
+        // Sharing rank 0 leaves the relative order of every non-chat session
+        // exactly as it was (23.6): the epoch and id tiebreaks are unchanged.
+        crate::collector::WindowRole::Terminal | crate::collector::WindowRole::Chat => 0,
         crate::collector::WindowRole::Unknown => 1,
         crate::collector::WindowRole::App => 2,
     };
@@ -609,6 +612,11 @@ fn libc_uid() -> u32 {
         .unwrap_or(0)
 }
 
+/// Filename fence for ephemeral context documents. The sweep only ever
+/// considers names it could itself have produced.
+const CTX_PREFIX: &str = "ctx-";
+const CTX_SUFFIX: &str = ".json";
+
 /// Short-lived context file with Drop-guard cleanup. Created O_EXCL 0600
 /// with an unpredictable name; `close()` removes explicitly, `Drop`
 /// removes as the safety net. The path is the only thing that may appear
@@ -627,21 +635,57 @@ impl EphemeralContext {
     /// Same, under an explicit directory (tests pass sandboxes; production
     /// passes [`ephemeral_dir`]). The directory is secured 0700 first.
     pub fn create_in(dir: &Path, document: &str) -> Result<EphemeralContext, String> {
+        Self::create_with(dir, document, None)
+    }
+
+    /// Write `document` to a new unpredictable 0600 file whose name carries
+    /// the creating process's pid. Identical privacy properties to
+    /// [`EphemeralContext::create`] (`O_EXCL`, `0600`, runtime dir, explicit
+    /// `close()`, `Drop` net); the pid tag exists so that a file left behind
+    /// by an abnormal exit — Rust std offers no signal handling and M8 adds
+    /// no dependency for it — is *reclaimable* by [`sweep_orphans`] instead
+    /// of surviving until logout.
+    pub fn create_owned(document: &str) -> Result<EphemeralContext, String> {
+        Self::create_owned_in(&ephemeral_dir(), document)
+    }
+
+    /// Same, under an explicit directory (test seam, mirroring
+    /// [`EphemeralContext::create_in`]).
+    pub fn create_owned_in(dir: &Path, document: &str) -> Result<EphemeralContext, String> {
+        Self::create_with(dir, document, Some(std::process::id()))
+    }
+
+    /// The one creation path. `owner` present ⇒ pid-tagged name
+    /// (`ctx-<pid>-<16 hex>.json`), absent ⇒ the original untagged name
+    /// (`ctx-<16 hex>.json`). Every early return unlinks: the guard is
+    /// constructed the instant the file exists, so a write failure drops it.
+    fn create_with(
+        dir: &Path,
+        document: &str,
+        owner: Option<u32>,
+    ) -> Result<EphemeralContext, String> {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         std::fs::create_dir_all(dir).map_err(|e| format!("cannot create ephemeral dir: {e}"))?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| format!("cannot secure ephemeral dir: {e}"))?;
         for _ in 0..16 {
-            let name = format!("ctx-{}.json", random_hex16());
+            let name = match owner {
+                Some(pid) => format!("{CTX_PREFIX}{pid}-{}{CTX_SUFFIX}", random_hex16()),
+                None => format!("{CTX_PREFIX}{}{CTX_SUFFIX}", random_hex16()),
+            };
             let path = dir.join(name);
             let mut opts = std::fs::OpenOptions::new();
             opts.write(true).create_new(true).mode(0o600);
             match opts.open(&path) {
                 Ok(mut file) => {
+                    // Own the path before the first fallible step: from here
+                    // on every exit — `?`, panic, or success followed by
+                    // `close()`/`Drop` — removes the file.
+                    let owned = EphemeralContext { path: Some(path) };
                     use std::io::Write as _;
                     file.write_all(document.as_bytes())
                         .map_err(|e| format!("cannot write context: {e}"))?;
-                    return Ok(EphemeralContext { path: Some(path) });
+                    return Ok(owned);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("cannot create context file: {e}")),
@@ -666,6 +710,102 @@ impl Drop for EphemeralContext {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+/// Remove pid-tagged ephemeral context documents whose owner process is
+/// *demonstrably* not a live `pitwall chat`. Called once at chat startup;
+/// returns how many files were removed.
+///
+/// `processes` is the already-collected observation from
+/// [`crate::platform::Platform::processes`] — the sweep does no `/proc`
+/// reading of its own, so it stays a pure function of (directory listing,
+/// observed processes) and is testable off-target.
+///
+/// Deliberately conservative. It removes a file only when *all* of these
+/// hold, and keeps it in every other case, including every case of doubt:
+///
+/// - the name is exactly `ctx-<pid>-<16 lowercase hex>.json`,
+/// - the entry is a regular file,
+/// - the observation is non-empty (an empty list means observation failed,
+///   not that nothing is running),
+/// - that pid is not in the observation as a `pitwall chat` process.
+pub fn sweep_orphans(processes: &[RawProcess]) -> usize {
+    sweep_orphans_in(&ephemeral_dir(), processes)
+}
+
+/// Same, under an explicit directory (test seam, mirroring
+/// [`EphemeralContext::create_in`]). An unreadable or absent directory is
+/// "nothing to sweep", not an error.
+pub fn sweep_orphans_in(dir: &Path, processes: &[RawProcess]) -> usize {
+    if processes.is_empty() {
+        return 0;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        // Regular files only: never follow or unlink a directory or symlink.
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let owner = match name.to_str().and_then(owner_pid_of) {
+            Some(pid) => pid,
+            None => continue,
+        };
+        if is_live_pitwall_chat(owner, processes) {
+            continue;
+        }
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Owner pid of a pid-tagged context name, or `None` for anything else —
+/// including the untagged `ctx-<16 hex>.json` form written by the summary
+/// path (no owner to check, and that path is synchronous and Drop-guarded)
+/// and every unrelated file in the runtime directory (leases included).
+fn owner_pid_of(file_name: &str) -> Option<u32> {
+    let body = file_name.strip_prefix(CTX_PREFIX)?;
+    let body = body.strip_suffix(CTX_SUFFIX)?;
+    let (pid, rand) = body.split_once('-')?;
+    // Exactly the shape `create_with` emits: a decimal pid with no padding,
+    // then 16 lowercase hex digits.
+    if pid.is_empty() || pid.len() > 10 || pid.starts_with('0') {
+        return None;
+    }
+    if !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if rand.len() != 16 || !rand.bytes().all(is_lower_hex) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+fn is_lower_hex(b: u8) -> bool {
+    b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+}
+
+/// True when `pid` appears in the observed process list as a `pitwall chat`
+/// invocation: argv[0] basename (or the executable basename) is `pitwall`
+/// and argv[1] is exactly `chat`. Shared with the chat number lease
+/// validator, which asks the same question of a lease's owner pid.
+pub fn is_live_pitwall_chat(pid: u32, processes: &[RawProcess]) -> bool {
+    processes.iter().any(|p| p.pid == pid && is_chat_argv(p))
+}
+
+/// The argv rule itself lives in [`crate::collector::is_pitwall_chat_argv`],
+/// which the collector's Chat_Role corroboration also calls against its own
+/// `ProcessInfo` view of the same observation. One definition, two callers:
+/// the orphan sweep, the lease validator and window discovery cannot end up
+/// disagreeing about what a `pitwall chat` process is.
+fn is_chat_argv(p: &RawProcess) -> bool {
+    crate::collector::is_pitwall_chat_argv(&p.command, &p.exe_name)
 }
 
 /// 64 unpredictable bits from the OS (`/dev/urandom`, no new deps).
@@ -695,7 +835,7 @@ mod tests {
         AgentIdentity, AgentKind, Confidence, ProjectInfo, SessionState, TerminalSession,
         WindowRole, LAST_ACTIVITY_KIND,
     };
-    use crate::platform::{GitInfo, RawProcess, WindowInfo};
+    use crate::platform::{ChatLease, GitInfo, InlineImage, RawProcess, TerminalSpec, WindowInfo};
 
     struct MockPlatform {
         text: TerminalText,
@@ -720,8 +860,15 @@ mod tests {
         fn hostname(&self) -> String {
             "testbox".to_string()
         }
-        fn launch_terminal(&self, _d: &str) -> Result<(), String> {
+        fn launch_terminal(&self, _spec: &TerminalSpec<'_>) -> Result<(), String> {
             Ok(())
+        }
+        fn chat_leases(&self) -> Vec<ChatLease> {
+            Vec::new()
+        }
+        fn inline_image_capability(&self) -> InlineImage {
+            // Fixed: a test must never probe a real terminal.
+            InlineImage::None
         }
         fn focus_window_address(&self, _a: &str) -> Result<(), String> {
             Ok(())
@@ -763,6 +910,7 @@ mod tests {
                 confidence: Confidence::Low,
                 evidence: vec!["terminal context only".to_string()],
             },
+            chat: None,
             state: SessionState::Sleeping,
             process_count: 2,
             processes: Vec::new(),
@@ -1047,6 +1195,137 @@ mod tests {
         assert!(!kinds.contains(&"session_appeared"), "{kinds:?}");
     }
 
+    fn raw_process(pid: u32, command: &str, exe_name: &str) -> RawProcess {
+        RawProcess {
+            pid,
+            ppid: 1,
+            name: exe_name.to_string(),
+            command: command.to_string(),
+            exe_name: exe_name.to_string(),
+            cwd: "/home/u".to_string(),
+            state_code: 'S',
+            starttime_ticks: 100,
+        }
+    }
+
+    #[test]
+    fn owned_context_is_pid_tagged_private_and_cleaned() {
+        let pitdir = std::env::temp_dir().join("pitwall-m8-owned-test");
+        let _ = std::fs::remove_dir_all(&pitdir);
+        let mut ctx = EphemeralContext::create_owned_in(&pitdir, "{}").unwrap();
+        let path = ctx.path().unwrap().to_path_buf();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            owner_pid_of(&name),
+            Some(std::process::id()),
+            "name must carry the owner pid: {name}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&pitdir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        ctx.close();
+        assert!(!path.exists());
+        assert!(ctx.path().is_none());
+        // Drop after an explicit close must not try to remove anything else.
+        drop(ctx);
+        // Drop alone is still the net for the owned form.
+        let dropped = {
+            let ctx = EphemeralContext::create_owned_in(&pitdir, "{}").unwrap();
+            ctx.path().unwrap().to_path_buf()
+        };
+        assert!(!dropped.exists(), "Drop must unlink the owned file");
+        let _ = std::fs::remove_dir_all(&pitdir);
+    }
+
+    #[test]
+    fn owner_pid_parses_only_names_we_emit() {
+        assert_eq!(owner_pid_of("ctx-4242-0123456789abcdef.json"), Some(4242));
+        // Untagged summary-path form: no owner, never swept.
+        assert_eq!(owner_pid_of("ctx-0123456789abcdef.json"), None);
+        // Unrelated runtime-dir residents.
+        assert_eq!(owner_pid_of("chat-001.lease"), None);
+        assert_eq!(owner_pid_of("state.json"), None);
+        assert_eq!(owner_pid_of("pitwall.sock"), None);
+        // Near-misses.
+        assert_eq!(owner_pid_of("ctx-4242-0123456789abcde.json"), None); // 15 hex
+        assert_eq!(owner_pid_of("ctx-4242-0123456789abcdeff.json"), None); // 17 hex
+        assert_eq!(owner_pid_of("ctx-4242-0123456789ABCDEF.json"), None); // upper
+        assert_eq!(owner_pid_of("ctx-42x2-0123456789abcdef.json"), None);
+        assert_eq!(owner_pid_of("ctx-0424-0123456789abcdef.json"), None); // padded
+        assert_eq!(owner_pid_of("ctx-4242-0123456789abcdef.txt"), None);
+        assert_eq!(owner_pid_of("ctx-4242-0123456789abcdef.json.bak"), None);
+        assert_eq!(owner_pid_of("ctx--0123456789abcdef.json"), None);
+    }
+
+    #[test]
+    fn sweep_removes_only_orphans_of_dead_chat_pids() {
+        let pitdir = std::env::temp_dir().join("pitwall-m8-sweep-test");
+        let _ = std::fs::remove_dir_all(&pitdir);
+        std::fs::create_dir_all(&pitdir).unwrap();
+        let live = pitdir.join("ctx-777-aaaaaaaaaaaaaaaa.json");
+        let orphan = pitdir.join("ctx-778-bbbbbbbbbbbbbbbb.json");
+        let untagged = pitdir.join("ctx-cccccccccccccccc.json");
+        let lease = pitdir.join("chat-001.lease");
+        for p in [&live, &orphan, &untagged, &lease] {
+            std::fs::write(p, "{}").unwrap();
+        }
+        let processes = vec![
+            raw_process(777, "/usr/bin/pitwall chat --session sess_1", "pitwall"),
+            raw_process(779, "/usr/bin/pitwall snapshot", "pitwall"),
+        ];
+        assert_eq!(sweep_orphans_in(&pitdir, &processes), 1);
+        assert!(live.exists(), "a live chat's context must survive");
+        assert!(!orphan.exists(), "orphan of a dead owner must go");
+        assert!(untagged.exists(), "untagged form is not swept");
+        assert!(lease.exists(), "unrelated runtime files untouched");
+
+        // An empty observation means observation failed: sweep nothing.
+        let orphan2 = pitdir.join("ctx-778-bbbbbbbbbbbbbbbb.json");
+        std::fs::write(&orphan2, "{}").unwrap();
+        assert_eq!(sweep_orphans_in(&pitdir, &[]), 0);
+        assert!(orphan2.exists());
+
+        // A pid that exists but is not `pitwall chat` is not a live chat:
+        // pid reuse by an unrelated process does not protect the orphan.
+        let reused = vec![
+            raw_process(777, "/usr/bin/pitwall chat", "pitwall"),
+            raw_process(778, "/usr/bin/vim notes.md", "vim"),
+        ];
+        assert_eq!(sweep_orphans_in(&pitdir, &reused), 1);
+        assert!(!orphan2.exists());
+        assert!(live.exists());
+
+        // An absent directory is "nothing to sweep", not an error.
+        let _ = std::fs::remove_dir_all(&pitdir);
+        assert_eq!(sweep_orphans_in(&pitdir, &processes), 0);
+    }
+
+    #[test]
+    fn live_chat_detection_requires_pitwall_and_chat() {
+        let procs = vec![
+            raw_process(10, "/usr/bin/pitwall chat", "pitwall"),
+            raw_process(11, "pitwall snapshot", "pitwall"),
+            raw_process(12, "/home/u/.local/share/mise/shims/pw chat", "pitwall"),
+            raw_process(13, "chat", "chat"),
+            raw_process(14, "/usr/bin/pitwallx chat", "pitwallx"),
+        ];
+        assert!(is_live_pitwall_chat(10, &procs));
+        assert!(!is_live_pitwall_chat(11, &procs), "wrong subcommand");
+        assert!(is_live_pitwall_chat(12, &procs), "shim argv0, real exe");
+        assert!(!is_live_pitwall_chat(13, &procs), "no pitwall argv0/exe");
+        assert!(!is_live_pitwall_chat(14, &procs), "not a basename match");
+        assert!(!is_live_pitwall_chat(99, &procs), "unobserved pid");
+    }
+
     #[test]
     fn no_persistent_schema_gets_terminal_text() {
         // Guardrail: the store module must not grow text-carrying columns.
@@ -1066,5 +1345,614 @@ mod tests {
         let fake_terminal_key = ["sk", "live-ABCDEF1234567890"].join("-");
         assert!(!doc.contains(fake_terminal_key.as_str()), "{doc}");
         assert!(doc.contains("[redacted]"), "{doc}");
+    }
+
+    // -----------------------------------------------------------------
+    // Property tests (M8 task 7.3). `proptest` is a dev-dependency pinned
+    // `=1.5.0`; each design property below is exactly ONE test at 100+
+    // cases. Generators go through the same seams the unit tests above use
+    // (`create_owned_in`, `sweep_orphans_in`), so no case touches the real
+    // runtime directory, spawns an agent, or opens a database.
+    // -----------------------------------------------------------------
+
+    use proptest::prelude::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PROP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// A fresh sandbox per case, unique per process *and* per case so that
+    /// 100+ cases and parallel test threads never share a directory.
+    fn prop_sandbox(tag: &str) -> PathBuf {
+        let n = PROP_SEQ.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "pitwall-m8-prop-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// The five invocation outcomes Property 16 quantifies over. Modelled,
+    /// not executed: no harness is spawned by the suite. What the property
+    /// needs from an outcome is *which cleanup branch runs* — an explicit
+    /// `close()` where the call reaches its end, `Drop` where it returns
+    /// early — and both must leave nothing behind.
+    #[derive(Debug, Clone, Copy)]
+    enum Outcome {
+        Answer,
+        EmptyText,
+        HarnessFailure,
+        Timeout,
+        EarlyRefusal,
+    }
+
+    impl Outcome {
+        fn of(ix: usize) -> Outcome {
+            match ix {
+                0 => Outcome::Answer,
+                1 => Outcome::EmptyText,
+                2 => Outcome::HarnessFailure,
+                3 => Outcome::Timeout,
+                _ => Outcome::EarlyRefusal,
+            }
+        }
+
+        /// `true` for the outcomes that return normally (the caller closes
+        /// explicitly), `false` for the ones that return early or abort
+        /// (`Drop` is the net).
+        fn closes_explicitly(self) -> bool {
+            matches!(self, Outcome::Answer | Outcome::EmptyText)
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 12.8, 15.7**
+        // Feature: pitwall-chat-and-brief-ticker, Property 16: Ephemeral context files never outlive their use — For any invocation outcome (answer, empty text, harness failure, timeout, early refusal), the context file existed with mode `0600` under the runtime directory during the run, no longer exists afterwards, and never appeared in the argument vector; and for any orphan left by an abnormal exit, the next chat startup sweep removes it once its owner pid is not a live `pitwall chat` process.
+        #[test]
+        fn prop16_ephemeral_context_never_outlives_its_use(
+            outcome_ix in 0usize..5,
+            model_ix in 0usize..3,
+            body in proptest::string::string_regex("[a-zA-Z0-9 .,:_-]{0,80}").unwrap(),
+            marker in proptest::string::string_regex("[0-9a-f]{16}").unwrap(),
+            orphan_pid in 2u32..900_000,
+            live_pid in 2u32..900_000,
+            orphan_rand in proptest::string::string_regex("[0-9a-f]{16}").unwrap(),
+            live_rand in proptest::string::string_regex("[0-9a-f]{16}").unwrap(),
+            pid_reused in any::<bool>(),
+        ) {
+            prop_assume!(orphan_pid != live_pid);
+            let outcome = Outcome::of(outcome_ix);
+            let model = match model_ix {
+                0 => None,
+                1 => Some("prov/model"),
+                _ => Some("openrouter/anthropic/claude-3.5-sonnet"),
+            };
+            let dir = prop_sandbox("p16");
+            // The document carries a unique marker so "never appeared in the
+            // argument vector" is checkable as a substring search over every
+            // element rather than as an inequality against the whole text.
+            let document = format!("{{\"ctx-marker\":\"{marker}\",\"body\":\"{body}\"}}");
+
+            // "under the runtime directory": production resolves the parent
+            // through `ephemeral_dir()`, which is absolute and pitwall-scoped;
+            // the case passes a sandbox through the same seam, so the real one
+            // is never written to.
+            let runtime = ephemeral_dir();
+            prop_assert!(runtime.is_absolute(), "runtime dir must be absolute: {runtime:?}");
+            prop_assert!(
+                runtime
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("pitwall")),
+                "runtime dir must be pitwall-scoped: {runtime:?}"
+            );
+
+            let mut guard = EphemeralContext::create_owned_in(&dir, &document)
+                .expect("creating an ephemeral context in a fresh sandbox");
+            let path = guard
+                .path()
+                .expect("a fresh guard owns its path")
+                .to_path_buf();
+            let name = path
+                .file_name()
+                .expect("context files are never bare directories")
+                .to_string_lossy()
+                .into_owned();
+
+            // --- during the run: it exists, it is private, it holds the text ---
+            prop_assert!(path.exists(), "the context file must exist during the run");
+            prop_assert_eq!(path.parent(), Some(dir.as_path()));
+            prop_assert!(
+                std::fs::read_to_string(&path).unwrap_or_default() == document,
+                "the document travels in the file, verbatim"
+            );
+            prop_assert_eq!(owner_pid_of(&name), Some(std::process::id()));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                prop_assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+                prop_assert_eq!(
+                    std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+
+            // --- argv carries the path at most, never the content ---
+            let bin = dir.join("opencode");
+            let argv = crate::summary::build_argv(
+                "opencode",
+                model,
+                &dir.to_string_lossy(),
+                &path,
+                &bin,
+            )
+            .expect("a valid model and an absolute dir build an argv");
+            let path_str = path.to_string_lossy().into_owned();
+            prop_assert_eq!(
+                argv.iter().filter(|a| a.as_str() == path_str.as_str()).count(),
+                1,
+                "the path appears exactly once (the `-f` value): {:?}",
+                argv
+            );
+            let f_ix = argv
+                .iter()
+                .position(|a| a == "-f")
+                .expect("opencode takes the context as a file");
+            prop_assert!(argv[f_ix + 1] == path_str, "the path is the `-f` value: {:?}", argv);
+            for element in &argv {
+                prop_assert!(
+                    !element.contains(marker.as_str()),
+                    "document content reached argv: {element}"
+                );
+                prop_assert!(
+                    !element.contains(document.as_str()),
+                    "the document reached argv: {element}"
+                );
+            }
+
+            // --- afterwards: nothing is left, whatever the outcome was ---
+            if outcome.closes_explicitly() {
+                guard.close();
+                prop_assert!(guard.path().is_none(), "a closed guard owns nothing");
+            } else {
+                drop(guard);
+            }
+            prop_assert!(
+                !path.exists(),
+                "no context file may outlive the run ({outcome:?})"
+            );
+
+            // --- an orphan from an abnormal exit is reclaimed at startup ---
+            let orphan = dir.join(format!("ctx-{orphan_pid}-{orphan_rand}.json"));
+            let live = dir.join(format!("ctx-{live_pid}-{live_rand}.json"));
+            std::fs::write(&orphan, "{}").expect("sandbox write");
+            std::fs::write(&live, "{}").expect("sandbox write");
+            let mut processes = vec![raw_process(
+                live_pid,
+                "/usr/bin/pitwall chat --session sess_0123456789abcdef",
+                "pitwall",
+            )];
+            if pid_reused {
+                // The orphan's owner pid is live again as something else:
+                // reuse must not protect the orphan.
+                processes.push(raw_process(orphan_pid, "/usr/bin/vim notes.md", "vim"));
+            }
+            prop_assert_eq!(sweep_orphans_in(&dir, &processes), 1);
+            prop_assert!(
+                !orphan.exists(),
+                "the sweep must reclaim an orphan whose owner is not a live pitwall chat"
+            );
+            prop_assert!(live.exists(), "a live chat's context must survive the sweep");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// FNV-1a 64 over the stable serialization, lowercase hex, `fnv:`
+    /// prefix: the pre-M8 recipe, restated here from the M5c constants
+    /// instead of routed through [`crate::ids::fnv1a_hex`], so the property
+    /// fails if M8 (or anything after it) changes the algorithm, the
+    /// prefix, or the text being hashed.
+    ///
+    /// No pre-M8 hash *value* is committed anywhere in the repository — the
+    /// `fnv:abc123` / `fnv:aaa` strings in the `output.rs` and `store.rs`
+    /// tests are opaque placeholders, not hashes of any context — so an
+    /// independent restatement of the recipe is the strongest oracle
+    /// available. If a real pre-M8 value is ever recorded, assert against
+    /// it here as well.
+    fn pre_m8_input_hash(context: &SummaryContext) -> String {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in context.stable_serialized().as_bytes() {
+            h ^= u64::from(*byte);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("fnv:{h:016x}")
+    }
+
+    /// The summary cache's whole decision procedure, as the CLI implements
+    /// it: `lookup_summary` is keyed on `input_hash`, and the snapshot path
+    /// compares `row.input_hash` against the freshly computed key (`ready`
+    /// on equality, `stale` otherwise). Hit/miss is therefore exactly key
+    /// equality — modelled here so the property needs no database.
+    fn cache_hits(stored_key: &str, current_key: &str) -> bool {
+        stored_key == current_key
+    }
+
+    /// The structured facts `stable_serialized` actually reads for one
+    /// session. Anything absent from this struct is, by construction,
+    /// outside the cache key.
+    #[derive(Debug, Clone)]
+    struct HashFacts {
+        id: String,
+        role: WindowRole,
+        state: SessionState,
+        agent: AgentKind,
+        confidence: Confidence,
+        process_count: usize,
+        last_activity_epoch: i64,
+        project: Option<ProjectInfo>,
+    }
+
+    fn role_of(ix: usize) -> WindowRole {
+        match ix {
+            0 => WindowRole::Terminal,
+            1 => WindowRole::App,
+            _ => WindowRole::Unknown,
+        }
+    }
+
+    fn state_of(ix: usize) -> SessionState {
+        match ix {
+            0 => SessionState::Running,
+            1 => SessionState::Sleeping,
+            2 => SessionState::Stopped,
+            _ => SessionState::Unknown,
+        }
+    }
+
+    fn agent_of(ix: usize) -> AgentKind {
+        match ix {
+            0 => AgentKind::Opencode,
+            1 => AgentKind::ClaudeCode,
+            2 => AgentKind::Codex,
+            3 => AgentKind::Gemini,
+            4 => AgentKind::Hermes,
+            5 => AgentKind::Aider,
+            _ => AgentKind::Unknown,
+        }
+    }
+
+    fn confidence_of(ix: usize) -> Confidence {
+        match ix {
+            0 => Confidence::High,
+            1 => Confidence::Medium,
+            2 => Confidence::Low,
+            _ => Confidence::Unknown,
+        }
+    }
+
+    fn event_kind_of(ix: usize) -> &'static str {
+        match ix {
+            0 => "session_appeared",
+            1 => "session_vanished",
+            2 => "agent_changed",
+            3 => "branch_changed",
+            4 => "git_changed",
+            _ => "checkpoint_created",
+        }
+    }
+
+    fn word() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("[a-z][a-z0-9_-]{1,10}").unwrap()
+    }
+
+    fn session_id() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("sess_[0-9a-f]{16}").unwrap()
+    }
+
+    /// Free-text fields, including secret-shaped ones, so the scrubbing
+    /// `stable_serialized` performs is exercised by the same inputs.
+    fn detail() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("(password=[a-z0-9]{1,8}|[a-z ]{0,24})").unwrap()
+    }
+
+    fn project_facts() -> impl Strategy<Value = Option<ProjectInfo>> {
+        proptest::option::of(
+            (
+                word(),
+                proptest::option::of(word()),
+                proptest::option::of(any::<bool>()),
+                any::<bool>(),
+            )
+                .prop_map(|(name, branch, git_clean, is_git_repo)| ProjectInfo {
+                    id: format!("proj_{}", crate::ids::fnv1a_hex(&name)),
+                    dir: format!("/home/u/{name}"),
+                    name,
+                    is_git_repo,
+                    branch,
+                    git_clean,
+                }),
+        )
+    }
+
+    fn hash_facts() -> impl Strategy<Value = HashFacts> {
+        (
+            session_id(),
+            0usize..3,
+            0usize..4,
+            0usize..7,
+            0usize..4,
+            0usize..12,
+            1_700_000_000i64..1_700_090_000i64,
+            project_facts(),
+        )
+            .prop_map(
+                |(
+                    id,
+                    role_ix,
+                    state_ix,
+                    agent_ix,
+                    conf_ix,
+                    process_count,
+                    last_activity_epoch,
+                    project,
+                )| HashFacts {
+                    id,
+                    role: role_of(role_ix),
+                    state: state_of(state_ix),
+                    agent: agent_of(agent_ix),
+                    confidence: confidence_of(conf_ix),
+                    process_count,
+                    last_activity_epoch,
+                    project,
+                },
+            )
+    }
+
+    /// Build a session from structured facts. `chat_shaped` varies ONLY
+    /// fields `stable_serialized` deliberately excludes — the window title
+    /// (where the Chat_Title_Grammar signal lives), the window address, the
+    /// window pid, the root pid, the agent evidence and the one-line
+    /// summary — so a `false`/`true` pair differs in exactly the facts a
+    /// Chat_Session's presence contributes and in nothing the cache key is
+    /// allowed to see. (`WindowRole::Chat` does not exist at this task; the
+    /// collector work lands later, so chat presence is modelled through the
+    /// two signals design §4.8 corroborates: the title and the owner pid.)
+    fn hash_session(facts: &HashFacts, chat_shaped: bool) -> TerminalSession {
+        let (title, address, pid, evidence, summary) = if chat_shaped {
+            (
+                "Pitwall Chat 001 · opencode · agent default · Work".to_string(),
+                "0x7ffd00".to_string(),
+                90_001u32,
+                vec!["lease chat-001 owner pid 90001".to_string()],
+                "Pitwall Chat 001 · opencode · Work · running".to_string(),
+            )
+        } else {
+            (
+                "nvim src/main.rs".to_string(),
+                "0x1".to_string(),
+                10u32,
+                vec!["terminal context only".to_string()],
+                "s".to_string(),
+            )
+        };
+        TerminalSession {
+            id: facts.id.clone(),
+            window: Some(WindowInfo {
+                address,
+                class: "foot".to_string(),
+                initial_class: "foot".to_string(),
+                title,
+                workspace: "1".to_string(),
+                pid,
+            }),
+            root_pid: pid,
+            role: facts.role,
+            project: facts.project.clone(),
+            agent: AgentIdentity {
+                kind: facts.agent.clone(),
+                confidence: facts.confidence,
+                evidence,
+            },
+            // The cache-key test models chat presence through the two
+            // corroborated signals (title + owner pid), not through this
+            // field, so it stays `None` on both sides of the comparison.
+            chat: None,
+            state: facts.state,
+            process_count: facts.process_count,
+            processes: Vec::new(),
+            last_activity_epoch: facts.last_activity_epoch,
+            last_activity_kind: LAST_ACTIVITY_KIND,
+            summary,
+        }
+    }
+
+    fn hash_snapshot(
+        hostname: &str,
+        facts: &[HashFacts],
+        chat_shaped: bool,
+        collected_at: i64,
+    ) -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            schema_version: 1,
+            collected_at_epoch: collected_at,
+            hostname: hostname.to_string(),
+            sessions: facts.iter().map(|f| hash_session(f, chat_shaped)).collect(),
+        }
+    }
+
+    fn hash_event() -> impl Strategy<Value = Event> {
+        (0usize..6, session_id(), word(), detail()).prop_map(
+            |(kind_ix, session_id, project, detail)| Event {
+                kind: event_kind_of(kind_ix),
+                session_id,
+                project,
+                detail,
+            },
+        )
+    }
+
+    fn hash_checkpoint() -> impl Strategy<Value = Checkpoint> {
+        (
+            session_id(),
+            word(),
+            proptest::option::of(word()),
+            proptest::option::of(detail()),
+            0usize..4,
+            word(),
+        )
+            .prop_map(
+                |(session_id, project, branch, note, state_ix, trigger)| Checkpoint {
+                    // Replaced with a unique id in the test body.
+                    id: 0,
+                    created_at: 1_700_000_000,
+                    project_id: format!("proj_{}", crate::ids::fnv1a_hex(&project)),
+                    session_id,
+                    project_dir: format!("/home/u/{project}"),
+                    branch,
+                    git_clean: None,
+                    agent_kind: "unknown".to_string(),
+                    agent_confidence: "low".to_string(),
+                    state: state_of(state_ix).as_str().to_string(),
+                    last_activity_epoch: 1_700_000_000,
+                    window_address: Some("0x1".to_string()),
+                    window_class: Some("foot".to_string()),
+                    note,
+                    trigger,
+                    observation_id: None,
+                },
+            )
+    }
+
+    fn hash_notification() -> impl Strategy<Value = crate::store::Notification> {
+        (word(), session_id(), word(), 0usize..4, detail()).prop_map(
+            |(kind, session_id, severity, state_ix, detail)| crate::store::Notification {
+                // Replaced with a unique id in the test body.
+                id: 0,
+                kind,
+                session_id,
+                project_id: "proj_0000000000000000".to_string(),
+                project_name: "Work".to_string(),
+                branch: None,
+                agent_kind: "unknown".to_string(),
+                state: state_of(state_ix).as_str().to_string(),
+                checkpoint_id: None,
+                created_at: 1_700_000_000,
+                read_at: None,
+                severity,
+                detail,
+            },
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 23.6, 23.7**
+        // Feature: pitwall-chat-and-brief-ticker, Property 28: Summary context hashing is unchanged by M8 — For any SummaryContext, the input hash is deterministic and equals the pre-M8 value for identical structured inputs, and the summary cache's hit/miss behaviour is unaffected by the presence of Chat_Sessions.
+        #[test]
+        fn prop28_summary_context_hashing_is_unchanged_by_m8(
+            hostname in word(),
+            facts in proptest::collection::vec(hash_facts(), 0..4),
+            events in proptest::collection::vec(hash_event(), 0..4),
+            checkpoints in proptest::collection::vec(hash_checkpoint(), 0..3),
+            notifications in proptest::collection::vec(hash_notification(), 0..3),
+        ) {
+            // Identities are unique in any real observation; make them unique
+            // here too, otherwise a reordered input is genuinely ambiguous and
+            // the case would be testing the reorder rather than the hash.
+            let mut ids: Vec<&str> = facts.iter().map(|f| f.id.as_str()).collect();
+            ids.sort_unstable();
+            prop_assume!(ids.windows(2).all(|w| w[0] != w[1]));
+            let checkpoints: Vec<Checkpoint> = checkpoints
+                .into_iter()
+                .enumerate()
+                .map(|(ix, mut c)| {
+                    c.id = ix as i64 + 1;
+                    c
+                })
+                .collect();
+            let notifications: Vec<crate::store::Notification> = notifications
+                .into_iter()
+                .enumerate()
+                .map(|(ix, mut n)| {
+                    n.id = ix as i64 + 1;
+                    n
+                })
+                .collect();
+
+            let plain = hash_snapshot(&hostname, &facts, false, 1_700_000_100);
+            let context = SummaryContext::new(
+                plain.clone(),
+                events.clone(),
+                checkpoints.clone(),
+                notifications.clone(),
+            );
+            let key = crate::summary::input_hash(&context);
+
+            // 1. Deterministic: identical structured inputs, identical key.
+            let again = SummaryContext::new(
+                plain.clone(),
+                events.clone(),
+                checkpoints.clone(),
+                notifications.clone(),
+            );
+            prop_assert_eq!(crate::summary::input_hash(&again), key.clone());
+
+            // 2. Order-normalised: the same facts delivered in a different
+            //    order are the same workspace, so the same key.
+            let reordered = SummaryContext::new(
+                plain.clone(),
+                events.iter().cloned().rev().collect(),
+                checkpoints.iter().cloned().rev().collect(),
+                notifications.iter().cloned().rev().collect(),
+            );
+            prop_assert_eq!(crate::summary::input_hash(&reordered), key.clone());
+
+            // 3. Still the pre-M8 recipe, over the pre-M8 text.
+            prop_assert_eq!(pre_m8_input_hash(&context), key.clone());
+            prop_assert!(
+                key.starts_with("fnv:") && key.len() == "fnv:".len() + 16,
+                "hash shape must not change: {key}"
+            );
+            prop_assert!(
+                context
+                    .stable_serialized()
+                    .starts_with("summary_prompt_version=2\n"),
+                "M8 must not move the prompt version: {}",
+                context.stable_serialized()
+            );
+
+            // 4. Chat presence does not perturb the key: the Chat_Title_Grammar
+            //    title, the chat's pids and its window address are all outside
+            //    the structured boundary, so a cached summary keeps hitting
+            //    while chats come and go.
+            let chatty = hash_snapshot(&hostname, &facts, true, 1_700_000_999);
+            let chat_context = SummaryContext::new(
+                chatty,
+                events.clone(),
+                checkpoints.clone(),
+                notifications.clone(),
+            );
+            let chat_key = crate::summary::input_hash(&chat_context);
+            prop_assert_eq!(chat_key.clone(), key.clone());
+            prop_assert!(cache_hits(&key, &chat_key), "chat presence must not cause a miss");
+
+            // 5. The miss side still fires on a structured change.
+            let moved = hash_snapshot(&format!("{hostname}-2"), &facts, false, 1_700_000_100);
+            let moved_key = crate::summary::input_hash(&SummaryContext::new(
+                moved,
+                events,
+                checkpoints,
+                notifications,
+            ));
+            prop_assert_ne!(moved_key.clone(), key.clone());
+            prop_assert!(!cache_hits(&key, &moved_key), "a changed workspace must miss");
+        }
     }
 }

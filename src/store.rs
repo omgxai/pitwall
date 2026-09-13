@@ -1590,6 +1590,7 @@ mod tests {
                 confidence: Confidence::High,
                 evidence: vec!["cmd:opencode (pid 11)".to_string()],
             },
+            chat: None,
             state,
             process_count: 2,
             processes: vec![ProcessInfo {
@@ -2386,6 +2387,7 @@ mod tests {
                     confidence: crate::collector::Confidence::Low,
                     evidence: Vec::new(),
                 },
+                chat: None,
                 state,
                 process_count: 1,
                 processes: Vec::new(),

@@ -51,6 +51,14 @@ Item {
     }
   }
   readonly property double collectedAt: record ? Number(record.collected_at || 0) : 0
+  // v4 additive top-level key (M8): product version for the panel footer.
+  // Absent on v1-v3 documents and on any non-string value, in which case the
+  // footer renders without a version rather than a fabricated one (7.7).
+  readonly property string pitwallVersion: {
+    var v = record ? record.pitwall_version : null
+    if (typeof v !== "string") return ""
+    return v.trim()
+  }
 
   // Primary session = most recently active. Stable choice: ties keep array
   // order (snapshot is id-sorted), so the hero doesn't flicker.
@@ -75,6 +83,55 @@ Item {
     for (var i = 0; i < sessions.length; i++) {
       if (sessions[i] !== primary) out.push(sessions[i])
     }
+    return out
+  }
+
+  // v4 additive per-session key (M8): chat facts, or null on every non-chat
+  // session. Defensive by contract (22.6): any unexpected shape - array,
+  // string, number, bool, missing keys, wrong-typed keys, a `number` that is
+  // not a three-digit string - yields null for that session alone; it then
+  // renders as an ordinary session and the rest of the panel is untouched.
+  // Both `typeof []` and `typeof null` are "object" in JS, so arrays and null
+  // are excluded explicitly. Values are returned verbatim (no invention), so
+  // writer -> reader round trips stay exact (22.3, 22.4).
+  function chatOf(s) {
+    if (!s || typeof s !== "object" || Array.isArray(s)) return null
+    var c = s.chat
+    if (!c || typeof c !== "object" || Array.isArray(c)) return null
+    if (typeof c.number !== "string" || !/^[0-9]{3}$/.test(c.number)) return null
+    if (typeof c.harness !== "string" || c.harness.trim().length === 0) return null
+    // "" means agent default; the label carries that, the id stays empty.
+    var model = (typeof c.model === "string") ? c.model : ""
+    // null/absent context_session_id is legitimate: whole-workspace context.
+    var ctx = (typeof c.context_session_id === "string" && c.context_session_id.length > 0)
+      ? c.context_session_id : null
+    var started = Number(c.started_at)
+    return {
+      number: c.number,
+      harness: c.harness,
+      model: model,
+      model_label: (model !== "") ? model : "agent default",
+      context_label: (typeof c.context_label === "string") ? c.context_label : "",
+      context_session_id: ctx,
+      started_at: (isFinite(started) && started > 0) ? Math.round(started) : 0
+    }
+  }
+
+  // Sessions carrying a valid chat object, ordered by chat number ascending
+  // (ties keep snapshot order). Empty when no session carries chat fields, so
+  // the panel presents no chat region at all (22.5, 18.6). Activity for these
+  // entries comes from the same session fields as any other session (18.8).
+  readonly property var chatSessions: {
+    var rows = []
+    for (var i = 0; i < sessions.length; i++) {
+      var c = chatOf(sessions[i])
+      if (c) rows.push({ order: Number(c.number), index: i, session: sessions[i] })
+    }
+    rows.sort(function (a, b) {
+      return (a.order - b.order) || (a.index - b.index)
+    })
+    var out = []
+    for (var j = 0; j < rows.length; j++) out.push(rows[j].session)
     return out
   }
 
@@ -130,7 +187,7 @@ Item {
       var parsed = JSON.parse(String(content || ""))
       var version = Number(parsed && parsed.state_version)
       var ok = parsed && typeof parsed === "object"
-        && (version === 1 || version === 2 || version === 3)
+        && (version === 1 || version === 2 || version === 3 || version === 4)
         && Array.isArray(parsed.sessions)
       if (!ok) throw new Error("unsupported state shape")
       root.record = parsed

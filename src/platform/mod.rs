@@ -54,6 +54,61 @@ pub struct GitInfo {
     pub clean: Option<bool>,
 }
 
+/// One terminal launch request.
+///
+/// This is the whole input to the single Terminal_Launch_Path
+/// ([`Platform::launch_terminal`]). An empty `command` means "just open an
+/// interactive terminal in `directory`" — exactly today's `resume`
+/// behaviour. A non-empty `command` is a fixed argument vector whose first
+/// element must be an absolute program path; it is never a shell string and
+/// is never interpolated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSpec<'a> {
+    /// Absolute, already-validated directory to open the terminal in.
+    pub directory: &'a str,
+    /// Program and arguments to run, or empty for an interactive shell.
+    pub command: &'a [String],
+}
+
+/// One observed chat number lease.
+///
+/// A lease is a file the running `pitwall chat` process created with
+/// `O_EXCL` under the runtime directory
+/// (`$XDG_RUNTIME_DIR/pitwall/chat-NNN.lease`), containing its own pid. It
+/// is *not* a counter: it remembers nothing about past numbers and vanishes
+/// with the process (explicit release plus `Drop`, tmpfs as the last net).
+///
+/// Reading a lease says only "this file exists and names this pid". Whether
+/// that pid is a live `pitwall chat` is a separate question, answered by
+/// [`crate::context::is_live_pitwall_chat`] against an observed process
+/// list — the platform never validates liveness itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChatLease {
+    /// Chat number, `1..=999` (the file name's three digits).
+    pub number: u16,
+    /// Pid recorded in the lease body by its owner.
+    pub pid: u32,
+}
+
+/// Inline raster image protocol support, detected at runtime.
+///
+/// These are *protocol* names, not emulator names: the variant says which
+/// wire protocol the terminal answered a query with, never which program is
+/// on the other end. Nothing in Pitwall reads a terminal's identity, and no
+/// behaviour is derived from one (Requirement 28.11).
+///
+/// `None` is a first-class outcome, not a failure: every documented chat
+/// function works without inline images (Requirement 28.10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineImage {
+    /// Terminal graphics protocol (APC `_G…`) acknowledged.
+    Kitty,
+    /// Sixel graphics advertised in a primary device-attributes reply.
+    Sixel,
+    /// No inline raster image protocol detected. Textual output only.
+    None,
+}
+
 /// Capabilities the core needs from the host OS.
 ///
 /// Observation (`processes`, `windows`, `git_info`, …) is side-effect free.
@@ -71,9 +126,34 @@ pub trait Platform {
     /// Ticks per second for `starttime_ticks` conversion (Linux: 100).
     fn clock_ticks_per_sec(&self) -> i64;
     fn hostname(&self) -> String;
-    /// Open a terminal at an already-validated absolute directory, detached.
-    /// Implementations must not invoke a shell and must not interpolate.
-    fn launch_terminal(&self, directory: &str) -> Result<(), String>;
+    /// Open a terminal at an already-validated absolute directory, detached,
+    /// optionally running a fixed argument vector inside it.
+    ///
+    /// This is the *only* terminal-launch path: widened rather than
+    /// siblinged so the two callers cannot drift apart and so no second
+    /// launch implementation exists. Implementations must not invoke a
+    /// shell, must not interpolate, and must reach the terminal only
+    /// through the OS terminal abstraction — never a named emulator and
+    /// never an emulator-specific application-identity or window-class
+    /// argument.
+    fn launch_terminal(&self, spec: &TerminalSpec<'_>) -> Result<(), String>;
+    /// Chat number leases currently present in the runtime directory.
+    ///
+    /// Observation only: reads and parses `chat-NNN.lease` names and their
+    /// pid bodies. It performs no liveness check, unlinks nothing, and
+    /// returns an empty vec when the directory is absent or unreadable —
+    /// "nothing observed", never an error. Callers decide which leases are
+    /// stale (see [`crate::context::is_live_pitwall_chat`]).
+    fn chat_leases(&self) -> Vec<ChatLease>;
+    /// Runtime probe: will this terminal accept an inline raster image?
+    ///
+    /// Probes *protocol support* by asking the terminal and reading its
+    /// answer. It must never read, infer, or branch on an emulator's
+    /// identity, must never block (hard deadline, small byte cap), and must
+    /// leave terminal settings exactly as it found them on every path —
+    /// including error paths. Anything unexpected is
+    /// [`InlineImage::None`], which is a fully supported outcome.
+    fn inline_image_capability(&self) -> InlineImage;
     /// Focus a compositor window by its validated address (`0x…` hex).
     /// Best-effort: fails cleanly when the window is gone.
     fn focus_window_address(&self, address: &str) -> Result<(), String>;

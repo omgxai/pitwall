@@ -168,7 +168,7 @@ pub fn build_argv(a: &Assignment) -> Vec<String> {
 /// extractor (tool payloads ignored). No persistence of any kind.
 pub fn execute(a: &Assignment, timeout: Duration) -> Result<String, String> {
     let argv = build_argv(a);
-    let raw = crate::summary::run_agent(&argv, timeout)?;
+    let raw = crate::summary::run_agent(&argv, None, timeout)?;
     let text = crate::summary::extract_summary_text(&raw);
     if text.is_empty() {
         return Err("agent returned no usable text".to_string());
@@ -179,7 +179,7 @@ pub fn execute(a: &Assignment, timeout: Duration) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{GitInfo, RawProcess, WindowInfo};
+    use crate::platform::{ChatLease, GitInfo, InlineImage, RawProcess, TerminalSpec, WindowInfo};
     use std::cell::RefCell;
 
     // NOTE: collect() derives real sess_* ids from windows; tests drive
@@ -208,9 +208,16 @@ mod tests {
         fn hostname(&self) -> String {
             "testbox".to_string()
         }
-        fn launch_terminal(&self, directory: &str) -> Result<(), String> {
-            self.launched.borrow_mut().push(directory.to_string());
+        fn launch_terminal(&self, spec: &TerminalSpec<'_>) -> Result<(), String> {
+            self.launched.borrow_mut().push(spec.directory.to_string());
             Ok(())
+        }
+        fn chat_leases(&self) -> Vec<ChatLease> {
+            Vec::new()
+        }
+        fn inline_image_capability(&self) -> InlineImage {
+            // Fixed: a test must never probe a real terminal.
+            InlineImage::None
         }
         fn focus_window_address(&self, _address: &str) -> Result<(), String> {
             Ok(())

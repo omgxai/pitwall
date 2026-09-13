@@ -9,7 +9,7 @@
 //! directory, never guesses among sessions, and never starts an agent.
 
 use crate::collector;
-use crate::platform::Platform;
+use crate::platform::{Platform, TerminalSpec};
 use crate::store;
 use std::path::Path;
 
@@ -85,8 +85,13 @@ pub fn resume(
         }
         Err(_) => return Err(format!("project directory unavailable: {}", cp.project_dir)),
     }
-    platform
-        .launch_terminal(&cp.project_dir)
+    // Level 2 is an interactive terminal only: an empty command keeps the
+    // launched argv exactly what it has always been (Requirement 23.1).
+    let launched = platform.launch_terminal(&TerminalSpec {
+        directory: &cp.project_dir,
+        command: &[],
+    });
+    launched
         .map(|()| ResumeOutcome::OpenedTerminal {
             directory: cp.project_dir,
         })
@@ -96,15 +101,27 @@ pub fn resume(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{GitInfo, RawProcess, WindowInfo};
+    use crate::platform::{ChatLease, GitInfo, InlineImage, RawProcess, WindowInfo};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
+    /// The recording platform mock. Every action the trait exposes is
+    /// counted or captured here, which is what lets "no action happened"
+    /// be asserted mechanically rather than argued.
+    ///
+    /// Note on harness spawns: the harness is not a `Platform` capability
+    /// (it goes through `summary::run_agent`), so it cannot be recorded
+    /// here. Harness-spawn counting uses fake harness binaries in a temp
+    /// dir on `PATH` (chat's tests).
     struct MockPlatform {
         sessions: Vec<(String, String)>, // (session_id, project_dir)
         launched: std::cell::RefCell<Vec<String>>,
         focused: std::cell::RefCell<Vec<String>>,
+        /// Leases this mock reports; `chat_leases` never touches a disk.
+        leases: Vec<ChatLease>,
+        /// How many times `chat_leases` was called.
+        lease_reads: std::cell::Cell<usize>,
         fail_launch: bool,
         fail_focus: bool,
     }
@@ -115,6 +132,8 @@ mod tests {
                 sessions,
                 launched: std::cell::RefCell::new(Vec::new()),
                 focused: std::cell::RefCell::new(Vec::new()),
+                leases: Vec::new(),
+                lease_reads: std::cell::Cell::new(0),
                 fail_launch: false,
                 fail_focus: false,
             }
@@ -151,13 +170,26 @@ mod tests {
         fn hostname(&self) -> String {
             "testbox".to_string()
         }
-        fn launch_terminal(&self, directory: &str) -> Result<(), String> {
+        fn launch_terminal(&self, spec: &TerminalSpec<'_>) -> Result<(), String> {
             if self.fail_launch {
                 return Err("boom".to_string());
             }
-            // Record argv surface: fixed form, directory only.
-            self.launched.borrow_mut().push(directory.to_string());
+            // Record argv surface: resume must always ask for a bare
+            // interactive terminal, never a command.
+            assert!(
+                spec.command.is_empty(),
+                "resume must never pass a command to the terminal"
+            );
+            self.launched.borrow_mut().push(spec.directory.to_string());
             Ok(())
+        }
+        fn chat_leases(&self) -> Vec<ChatLease> {
+            self.lease_reads.set(self.lease_reads.get() + 1);
+            self.leases.clone()
+        }
+        fn inline_image_capability(&self) -> InlineImage {
+            // Fixed: a test must never probe a real terminal.
+            InlineImage::None
         }
         fn focus_window_address(&self, address: &str) -> Result<(), String> {
             if self.fail_focus {

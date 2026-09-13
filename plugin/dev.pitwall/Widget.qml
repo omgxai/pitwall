@@ -200,6 +200,56 @@ Panel {
     })
   }
 
+  // --- Open Chat (Requirement 8) ---
+  // A pinned resumable (`r:`-prefixed) names a *vanished* session. It is not
+  // live, so it cannot be a chat context; the launch falls back to workspace
+  // context and the result line says so rather than implying the checkpoint
+  // is still running.
+  function chatPinnedIsResumable(pinned) {
+    return pinned !== "" && pinned.charAt(0) === "r"
+  }
+
+  // Hint line beneath the control: states which context an activation would
+  // use, in the same words the result line will use afterwards. Fixed strings
+  // only — nothing here is derived from a model (8.8).
+  function chatHintText() {
+    var pinned = String(root.selectedId || "")
+    if (pinned === "") return "Opens a native terminal chat about the whole workspace."
+    if (root.chatPinnedIsResumable(pinned)) return "Pinned entry is not live \u2014 opens a workspace chat instead."
+    if (!/^sess_[0-9a-f]{16}$/.test(pinned)) return "Pinned selection is not a valid session."
+    return "Opens a native terminal chat about the pinned session."
+  }
+
+  // Fixed argv, no shell, no caller-composed command line (8.4). Exactly two
+  // shapes leave here: [pitwall, "chat"] for whole-workspace context (8.3) and
+  // [pitwall, "chat", "--session", <sess id>] for a pinned live session (8.2).
+  // Anything else refuses before spawning (8.6).
+  function openChat() {
+    var argv = [root.pitwallBinary, "chat"]
+    var pinned = String(root.selectedId || "")
+    var viaResumable = root.chatPinnedIsResumable(pinned)
+    if (pinned !== "" && !viaResumable) {
+      if (!/^sess_[0-9a-f]{16}$/.test(pinned)) {
+        // Refuse — never a silent fall back to workspace context (8.6).
+        console.warn("pitwall", "Refusing chat with invalid session id", pinned)
+        root.announce("Could not open chat: invalid session.", true)
+        return
+      }
+      argv.push("--session")
+      argv.push(pinned)
+    }
+    runFixed(argv, function(code) {
+      if (code !== 0) {
+        console.warn("pitwall", "chat exited", code)
+        root.announce("Chat launch failed. Your workspace was not changed.", true)
+      } else if (viaResumable) {
+        root.announce("Pitwall Chat opening with workspace context \u2014 the pinned entry is not live.", false)
+      } else {
+        root.announce("Pitwall Chat opening.", false)
+      }
+    })
+  }
+
   function stopSession(s) {
     // SIGTERM only, numeric pid only, explicit click only. Never SIGKILL,
     // never a shell. The session root owns the tree; the terminal owns
@@ -435,8 +485,13 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360))
+    // Header, rail, Open Chat control and footer, plus the three panelColumn
+    // gaps between the four. openChatItem's and footerItem's heights are both
+    // type-driven (a kit button plus single elided lines), so neither depends
+    // on the height being computed here — no loop.
     contentHeight: panel.fittedContentHeight(
-      headerItem.height + railColumn.implicitHeight + Style.space(8), Style.space(560))
+      headerItem.height + railColumn.implicitHeight + openChatItem.implicitHeight
+        + footerItem.implicitHeight + Style.space(24), Style.space(560))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -558,8 +613,19 @@ Panel {
         Flickable {
         id: railFlick
         width: parent.width
+        // The rail keeps every pixel the header, the Open Chat control and the
+        // footer do not claim, and never drops below 200: it stays the largest
+        // operational region of the expanded panel (7.2). Three gaps now, one
+        // per boundary between the four stacked regions. The 200 floor is the
+        // known soft spot: if contentHeight were ever clamped very low the
+        // floor would win and the footer would be pushed off screen. Nothing
+        // here widens that window beyond the extra region's own height, and it
+        // only bites when the panel is squeezed — in the normal case the
+        // subtraction lands on railColumn.implicitHeight and Math.min takes it.
         height: Math.min(railColumn.implicitHeight,
-          Math.max(200, panel.contentHeight - headerItem.height - panelColumn.spacing))
+          Math.max(200, panel.contentHeight - headerItem.height
+            - openChatItem.implicitHeight - footerItem.implicitHeight
+            - panelColumn.spacing * 3))
         contentWidth: width
         contentHeight: railColumn.implicitHeight
         clip: true
@@ -970,12 +1036,22 @@ Panel {
             Repeater {
               model: root.railGroups
               delegate: Column {
+                id: groupItem
                 width: railColumn.width
                 spacing: Style.space(4)
 
+                // The Chat Sessions region renders one weight step below the
+                // agent/workspace groups above it (18.5). Same row form, same
+                // tokens, smaller type and muted name — no separate layout.
+                readonly property bool captionWeight: modelData.caption === true
+                // `real`, not `int`: the non-chat branch has to reproduce
+                // Style.font.bodySmall exactly, since the group row height is
+                // derived from it and was measured with it.
+                readonly property real rowTextSize: captionWeight ? Style.font.caption : Style.font.bodySmall
+
                  Item {
                    width: parent.width
-                   height: Style.font.bodySmall + Style.space(4)
+                   height: groupItem.rowTextSize + Style.space(4)
 
                    Rectangle {
                      anchors.fill: parent
@@ -1013,9 +1089,9 @@ Panel {
                       anchors.verticalCenter: parent.verticalCenter
                       elide: Text.ElideRight
                       text: modelData.label
-                      color: Color.foreground
+                      color: groupItem.captionWeight ? Color.muted : Color.foreground
                       font.family: Style.font.family
-                      font.pixelSize: Style.font.bodySmall
+                      font.pixelSize: groupItem.rowTextSize
                       renderType: Text.NativeRendering
                     }
 
@@ -1039,7 +1115,7 @@ Panel {
                     text: modelData.collapsed ? String.fromCodePoint(0xF0142) : String.fromCodePoint(0xF0140)
                     color: Qt.darker(Color.foreground, 1.4)
                     font.family: Style.font.family
-                    font.pixelSize: Style.font.bodySmall
+                    font.pixelSize: groupItem.rowTextSize
                     renderType: Text.NativeRendering
                   }
 
@@ -1051,39 +1127,191 @@ Panel {
                   }
                 }
 
-                Repeater {
-                  model: (modelData.kind === "group" && !modelData.collapsed) ? modelData.entries : []
-                  delegate: SessionBar {
-                    width: railColumn.width
-                    entry: modelData.ref
-                    resumable: modelData.hist
-                    frac: modelData.hist ? 0.25 : root.barFrac(modelData.ref.age_secs)
-                    selected: root.selectedId === modelData.selId
-                    dimmed: root.selectedId !== "" && root.selectedId !== modelData.selId
-                    showCard: root.selectedId === modelData.selId
-                    detailText: modelData.hist ? root.detailFor(modelData.ref, true) : root.detailFor(modelData.ref, false)
-                    notifs: root.notifsFor(modelData.selId)
-                    onNotifClicked: function(nid) { root.markNotifRead(nid) }
-                    canFocus: !modelData.hist
-                    canStop: !modelData.hist
-                    canClose: !modelData.hist
-                    canResume: modelData.hist
-                    canAssign: !modelData.hist
-                    resumeTooltip: modelData.hist ? root.resumeTooltipFor(modelData.ref) : ""
-                    onClicked: {
-                      root.selectedId = (root.selectedId === modelData.selId) ? "" : modelData.selId
+                // Wrapper carries the region's visual weight (18.5): chat
+                // entries sit below the live agent bars. The opacity lives
+                // here rather than on SessionBar because SessionBar binds its
+                // own opacity for the dimmed state; two separate items
+                // compose, one overridden binding would not. Static value,
+                // no Behavior, so the ≤2 concurrent animation budget is
+                // untouched (7.11). `visible` keeps a collapsed group from
+                // reserving a phantom row of Column spacing.
+                Column {
+                  width: parent.width
+                  spacing: Style.space(4)
+                  visible: !modelData.collapsed && modelData.entries.length > 0
+                  opacity: groupItem.captionWeight ? 0.82 : 1.0
+
+                  Repeater {
+                    model: (modelData.kind === "group" && !modelData.collapsed) ? modelData.entries : []
+                    // Chat entries differ from live agent bars in exactly two
+                    // ways, both decided here: they carry `chatFacts` (which
+                    // switches the bar to the chat label and caption weight),
+                    // and their action set is focus only (18.7). Which actions
+                    // an entry may offer is already parent policy on this
+                    // delegate — `canStop`/`canClose`/`canAssign` are computed
+                    // right here for hist entries too — so the restriction
+                    // belongs in the same expressions rather than as a second
+                    // veto inside SessionBar. Selection, hover, pinning and
+                    // the existing action wiring are untouched (7.12).
+                    delegate: SessionBar {
+                      width: railColumn.width
+                      entry: modelData.ref
+                      chatFacts: modelData.chatFacts || null
+                      resumable: modelData.hist
+                      // Duration fraction from the record's own `age_secs`,
+                      // chat entries included: no chat-specific activity is
+                      // synthesised anywhere (18.8).
+                      frac: modelData.hist ? 0.25 : root.barFrac(modelData.ref.age_secs)
+                      selected: root.selectedId === modelData.selId
+                      dimmed: root.selectedId !== "" && root.selectedId !== modelData.selId
+                      showCard: root.selectedId === modelData.selId
+                      detailText: modelData.hist ? root.detailFor(modelData.ref, true) : root.detailFor(modelData.ref, false)
+                      notifs: root.notifsFor(modelData.selId)
+                      onNotifClicked: function(nid) { root.markNotifRead(nid) }
+                      canFocus: !modelData.hist
+                      canStop: !modelData.hist && modelData.chat !== true
+                      canClose: !modelData.hist && modelData.chat !== true
+                      canResume: modelData.hist
+                      canAssign: !modelData.hist && modelData.chat !== true
+                      resumeTooltip: modelData.hist ? root.resumeTooltipFor(modelData.ref) : ""
+                      onClicked: {
+                        root.selectedId = (root.selectedId === modelData.selId) ? "" : modelData.selId
+                      }
+                      onHovered: function(h) {
+                        root.hoveredId = h ? modelData.selId : ""
+                      }
+                      onFocusRequested: root.focusSession(modelData.ref)
+                      onStopRequested: root.stopSession(modelData.ref)
+                      onCloseRequested: root.closeSession(modelData.ref)
+                      onResumeRequested: root.resumeCheckpoint(String(modelData.ref.session_id || ""))
                     }
-                    onHovered: function(h) {
-                      root.hoveredId = h ? modelData.selId : ""
-                    }
-                    onFocusRequested: root.focusSession(modelData.ref)
-                    onStopRequested: root.stopSession(modelData.ref)
-                    onCloseRequested: root.closeSession(modelData.ref)
-                    onResumeRequested: root.resumeCheckpoint(String(modelData.ref.session_id || ""))
                   }
                 }
               }
             }
+          }
+        }
+      }
+
+      // ---- Open_Chat_Control (8.1, 8.7) ----
+      // Full-width kit `Button` plus a caption-weight hint line, directly
+      // below the rail and directly above the footer (design §4.13). Outside
+      // the Flickable for the same reason the footer is: the one control that
+      // opens the radio room should not scroll away with the rail. Its height
+      // enters the panel geometry exactly like footerItem's — added to
+      // `panel.contentHeight`, subtracted in `railFlick.height`.
+      //
+      // NO GLYPH, by recorded decision (gate 1.3): the task text asks for a
+      // monochrome icon, but no chat codepoint could be verified present in
+      // the installed font on this machine, and the plugin's binding rule
+      // (README "Glyphs") forbids unverified codepoints. A text-only label
+      // beats a tofu box, so the control ships as the words `Open Chat`
+      // alone. The border and hover treatment come from the kit Button —
+      // the same component the brief's generate control uses — so no colour
+      // or font value is introduced here (7.4, 7.5, 7.9).
+      //
+      // Always visible, including while the settings view has replaced the
+      // rail: like the header and the footer, this control lives outside the
+      // settings swap. Keeping it visible also keeps its `implicitHeight`
+      // honest, which the two geometry expressions depend on (a Column
+      // reports a hidden child's implicit height, so a `visible` binding here
+      // would silently overstate the panel's content height).
+      Column {
+        id: openChatItem
+        width: parent.width
+        spacing: Style.space(4)
+
+        Button {
+          id: openChatButton
+          width: parent.width
+          text: "Open Chat"
+          // Activation only spawns the CLI. No summary, no model call, no
+          // inference on render, hover or click (8.8).
+          onClicked: root.openChat()
+        }
+
+        // Caption-weight hint: names the context the launch would use, so the
+        // pinned/unpinned distinction (8.2, 8.3) is visible before clicking.
+        Text {
+          id: openChatHint
+          width: parent.width
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+          maximumLineCount: 1
+          text: root.chatHintText()
+          color: Color.muted
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          renderType: Text.NativeRendering
+        }
+      }
+
+      // ---- footer line (7.7) ----
+      // Wordmark, product version and the product statement, all caption
+      // weight, separated from the rail by the same hairline the group rows
+      // use. Outside the Flickable, so the identity line is always on screen
+      // rather than scrolling away with the rail.
+      Column {
+        id: footerItem
+        width: parent.width
+        spacing: Style.space(6)
+
+        Rectangle {
+          width: parent.width
+          height: 1
+          color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
+        }
+
+        Item {
+          width: parent.width
+          height: Math.max(footerLeft.implicitHeight, footerStatement.implicitHeight)
+
+          Row {
+            id: footerLeft
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(6)
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "PITWALL"
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              renderType: Text.NativeRendering
+            }
+
+            // Absent version ⇒ absent field. The wordmark and the statement
+            // still render; nothing is invented in its place.
+            Text {
+              visible: root.pitwallVersionText() !== ""
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: root.pitwallVersionText()
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              renderType: Text.NativeRendering
+            }
+          }
+
+          Text {
+            id: footerStatement
+            anchors.left: footerLeft.right
+            anchors.leftMargin: Style.space(8)
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            horizontalAlignment: Text.AlignRight
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            maximumLineCount: 1
+            text: root.productStatement
+            color: Color.muted
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            renderType: Text.NativeRendering
           }
         }
       }
@@ -1096,14 +1324,31 @@ Panel {
   // tier via the pre-sorted live/resumable arrays. Groups key on shared
   // project id, singletons on their own id. Collapsed state is a plain
   // object keyed by group key (reassigned wholesale so bindings fire).
-  // Groups start collapsed (expandedGroups empty); headers toggle.
-  // Collapsed default keeps the rail a project map, not a process list.
+  // Agent/workspace groups start collapsed; headers toggle. Collapsed default
+  // keeps the rail a project map, not a process list. The chat region is the
+  // one group that starts expanded (see groupDefaultExpanded).
   readonly property var tierOrder: ["pitwall-native", "agents", "workspace", "system"]
   property var expandedGroups: ({})
+  // The chat region is one group like any other, keyed by the group name the
+  // state artifact assigns chat sessions (task 11.2), so collapse state,
+  // unread indexing and the header form all come for free.
+  readonly property string chatGroupKey: "chat:sessions"
+  // Agent/workspace groups start collapsed (the rail is a project map, not a
+  // process list). The chat region starts expanded: a discovered chat has to
+  // be presented as an entry, not hidden behind a chevron (18.1).
+  function groupDefaultExpanded(key) {
+    return key === root.chatGroupKey
+  }
+  function groupExpanded(key) {
+    var v = expandedGroups[key]
+    return (v === undefined) ? groupDefaultExpanded(key) : !!v
+  }
   function toggleGroup(key) {
     var next = {}
     for (var k in expandedGroups) next[k] = expandedGroups[k]
-    next[key] = !next[key]
+    // Flip the *effective* state, not the raw slot: a group whose default is
+    // expanded has no slot yet, and !undefined would read as "expand" again.
+    next[key] = !groupExpanded(key)
     expandedGroups = next
   }
 
@@ -1126,6 +1371,15 @@ Panel {
     return String(name) + " \u00b7 " + entries.length
   }
 
+  // ---- chat sessions ----
+  // Chat facts arrive with state.json v4 as a per-session `chat` object.
+  // StateReader owns the normalisation and the ordering-by-number; the panel
+  // only asks whether a session is a chat. Until the artifact carries chat
+  // fields, `chatSessions` is empty and no chat region renders at all (18.6).
+  function isChatSession(s) {
+    return stateReader.chatOf(s) !== null
+  }
+
   readonly property var railGroups: {
     var out = []
     var live = liveSessions
@@ -1135,6 +1389,12 @@ Panel {
     var i, s, gkey
     for (i = 0; i < live.length; i++) {
       s = live[i] || {}
+      // Chat sessions are held out of the tier walk and appended as their own
+      // region below every agent/workspace group (18.5). They cannot simply
+      // ride the walk: task 11.2 gives them tier `pitwall-native`, which
+      // tierOrder places *first*, the opposite of the required prominence
+      // order (7.1).
+      if (root.isChatSession(s)) continue
       gkey = String(s.group || s.id || ("live-" + i))
       if (!groups[gkey]) {
         groups[gkey] = { key: gkey, tier: String(s.tier || "workspace"), live: [], hist: [] }
@@ -1177,17 +1437,44 @@ Panel {
         if (g.tier !== t) continue
         entries = []
         for (var li = 0; li < g.live.length; li++) {
-          entries.push({ kind: "live", hist: false, ref: g.live[li], selId: String(g.live[li].id || "") })
+          entries.push({ kind: "live", hist: false, chat: false, ref: g.live[li], selId: String(g.live[li].id || "") })
         }
         for (var hi = 0; hi < g.hist.length; hi++) {
-          entries.push({ kind: "hist", hist: true, ref: g.hist[hi], selId: "r:" + String(g.hist[hi].session_id || "") })
+          entries.push({ kind: "hist", hist: true, chat: false, ref: g.hist[hi], selId: "r:" + String(g.hist[hi].session_id || "") })
         }
         if (entries.length === 0) continue
-        collapsed = !expandedGroups[g.key]
-        out.push({ kind: "group", key: g.key, tier: t, label: groupDisplayName(entries),
+        collapsed = !groupExpanded(g.key)
+        out.push({ kind: "group", key: g.key, tier: t, caption: false,
+          label: groupDisplayName(entries),
           collapsed: collapsed, entries: collapsed ? [] : entries,
           unread: groupUnread(g.key, entries) })
       }
+    }
+    // ---- Chat Sessions region (18.1, 18.5, 18.6) ----
+    // Last in the model, so it renders below every agent/workspace group, and
+    // `caption: true` drops the whole region one weight step. Absent entirely
+    // when no session carries chat fields — no empty header, no placeholder.
+    // Same single-row group form as every other group (7.6), and the tier icon
+    // is the existing `pitwall-native` flag, so no new codepoint enters the
+    // plugin (gate 1.3).
+    var chats = stateReader.chatSessions
+    if (chats.length > 0) {
+      var centries = []
+      for (var xi = 0; xi < chats.length; xi++) {
+        // `chatFacts` is the normalised object StateReader already validated,
+        // resolved once here rather than per binding evaluation in the
+        // delegate. Ordinary entries carry no such key, so their bars get
+        // null and render exactly as before.
+        centries.push({ kind: "live", hist: false, chat: true, ref: chats[xi],
+          chatFacts: stateReader.chatOf(chats[xi]),
+          selId: String(chats[xi].id || "") })
+      }
+      var ccollapsed = !groupExpanded(root.chatGroupKey)
+      out.push({ kind: "group", key: root.chatGroupKey, tier: "pitwall-native",
+        caption: true,
+        label: centries.length > 1 ? "Chat Sessions \u00b7 " + centries.length : "Chat Sessions",
+        collapsed: ccollapsed, entries: ccollapsed ? [] : centries,
+        unread: groupUnread(root.chatGroupKey, centries) })
     }
     return out
   }
@@ -1344,6 +1631,23 @@ Panel {
     var line = m[1].trim().replace(/\s+/g, " ")
     if (line === "") return ""
     return line.length > 140 ? line.slice(0, 137) + "…" : line
+  }
+
+  // ---- footer (7.7) ----
+  // The product statement is a fixed panel string, not derived from anything
+  // in the artifact.
+  readonly property string productStatement: "The human's window into the AI workspace."
+
+  // Footer version. `pitwall_version` is a top-level state.json v4 key that
+  // task 11.2 still has to emit; StateReader already yields "" for every
+  // document that does not carry it. Presentation only: the `v` prefix is the
+  // panel's, the digits are the artifact's. Anything that is not a plain
+  // version string renders as no version at all — the footer keeps the
+  // wordmark and the statement rather than showing a fabricated value (7.7).
+  function pitwallVersionText() {
+    var v = String(stateReader.pitwallVersion || "")
+    if (!/^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$/.test(v)) return ""
+    return v.charAt(0) === "v" ? v : "v" + v
   }
 
   function modelValue() {

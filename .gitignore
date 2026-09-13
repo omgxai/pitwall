@@ -29,3 +29,6 @@ config/*.toml
 
 # Omarchy plugin build artifacts
 plugin/**/*.zip
+
+# Kiro spec workspace (local only, never committed)
+.kiro/
