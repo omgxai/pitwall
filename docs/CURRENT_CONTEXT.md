@@ -280,6 +280,9 @@ brand asset added. M6 user-local packaging is implemented: `install.sh`
 installs the release binary, plugin, and optional user units; the clean-room
 smoke test passes; uninstall preserves user data. The v0.1.0 release gate
 passes; fresh-machine Omarchy verification remains a follow-up limitation.
+M7 summary freshness now rejects mismatched cached text, and the ticker
+rotates bounded summary sentences. Chat and external channels remain
+deferred because the current runner is synchronous summary-only execution.
 Directions: AI Workforce Design + community Recipes (see
 `docs/AI_WORKFORCE.md`, `docs/RECIPES.md`). Contribute: recipes,
 patterns, Omarchy integration, detection, docs, tests. MIT.

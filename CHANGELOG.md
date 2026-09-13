@@ -6,7 +6,13 @@ All notable changes to Pitwall are documented here. Format follows
 
 ## [Unreleased]
 
-No unreleased changes.
+- M7 summary freshness hardening: snapshot now compares the cached summary's
+  exact structured input hash before exposing it. Changed workspaces surface
+  an explicit stale state with no old summary text.
+- M7 summary ticker: bounded sentence items rotate continuously while the
+  panel is open, with hover/expanded pause and clean reset on content change.
+- M7 panel feedback: expanded `PITWALL · N` session count and targeted
+  notification-read confirmation.
 
 ## [0.1.0] - 2026-09-13
 

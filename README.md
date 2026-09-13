@@ -239,6 +239,11 @@ interaction, context-window monitoring and handover, project/recipe
 bootstrap, agent communication channels, multi-node Pitwall,
 temporary remote summary sharing.
 
+M7 currently hardens summary freshness and rotates bounded summary sentences
+in the ticker. Interactive Pitwall Chat and external communication channels
+are not implemented; the configured agent runner remains an explicit,
+foreground summary operation.
+
 ## Branding
 
 - `assets/flag.svg` (+ `flag-64.png`): the 16px checkered flag — the
