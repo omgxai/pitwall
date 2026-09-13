@@ -222,6 +222,9 @@ impl SummaryContext {
     /// time, PIDs, window addresses, and terminal text are intentionally out.
     pub fn stable_serialized(&self) -> String {
         let mut out = String::new();
+        // Bump when the human-facing summary contract changes; old cached
+        // prose must not survive a prompt-quality change as if it were fresh.
+        out.push_str("summary_prompt_version=2\n");
         out.push_str(&format!("host={}\n", self.snapshot.hostname));
         let mut sessions: Vec<_> = self.snapshot.sessions.iter().collect();
         sessions.sort_by(|a, b| a.id.cmp(&b.id));

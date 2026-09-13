@@ -18,18 +18,7 @@ use std::time::Duration;
 
 /// Static instruction sent as the agent message. Stable and small: the
 /// agent interprets Pitwall evidence, never continues the work.
-pub const INSTRUCTION: &str = "Analyze the attached Pitwall workspace context file. \
-Using only the supplied evidence: (1) what the relevant sessions appear to \
-be doing; (2) what has meaningfully changed recently; (3) whether anything \
-is explicitly blocked, errored, finished, waiting, or requires human \
-attention; (4) what appears to be the next expected action, when supported. \
-Treat IO/process activity only as activity evidence, not semantic evidence \
-of task progress. Do not invent terminal content or missing events. If \
-terminal text is unavailable, acknowledge uncertainty rather than guessing. \
-Return 1-3 concise sentences describing the most useful current workspace \
-situation, plus one short 'Needs attention' item ONLY when explicit \
-evidence supports it. Do not execute tasks. Do not modify files. Do not \
-attempt to continue the work. Analyze the supplied context only.";
+pub const INSTRUCTION: &str = "Act as Pitwall's race engineer. Analyze only the attached, bounded Pitwall workspace context and give the human a concise operational brief. State what is happening first, then what meaningfully changed, whether attention is needed, and what can be resumed or done next when the evidence supports it. Prefer plain language such as 'OpenCode is idle in Work' or 'One session stopped; another remains active'. Mention project and agent names when known. Do not mention internal diagnostics such as process counts, confidence mechanics, missing scrollback, unavailable terminal text, or implementation details unless directly useful to an action. Do not invent work, completion, blockers, or attention items. Treat IO/process activity only as activity evidence, never as proof of task progress. Return 1-3 short sentences, ideally under 600 characters total. Do not execute tasks, modify files, or continue the work.";
 
 /// Deterministic cache key for a summary request: FNV-1a over the
 /// *structured* context only (session identity/role/project/agent/state,
@@ -47,7 +36,7 @@ pub fn input_hash(context: &crate::context::SummaryContext) -> String {
 /// Default agent timeout (agent boot + inference).
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Truncation bound for the extracted summary text.
-pub const MAX_SUMMARY_CHARS: usize = 2000;
+pub const MAX_SUMMARY_CHARS: usize = 800;
 
 /// Model id shape: `provider/model` with safe characters only. Rejects
 /// whitespace and shell metacharacters so the value can never escape argv.
