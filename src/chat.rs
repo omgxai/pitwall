@@ -5479,3 +5479,3199 @@ mod resume_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    //! Property tests for the chat surface: tasks 8.4, 9.5, 9.6 and the Rust
+    //! half of 13.4.
+    //!
+    //! `proptest` is a dev-dependency pinned `=1.5.0`; each design property
+    //! below is exactly **one** test at 100+ cases, tagged with its full
+    //! property text on the line above the test. The example tests in
+    //! [`super::tests`], [`super::responder_tests`] and
+    //! [`super::resume_tests`] pin individual shapes byte-for-byte; nothing
+    //! here repeats them — every test below generalises over generated
+    //! inputs.
+    //!
+    //! One module rather than three because six of the fourteen properties
+    //! span the descriptor, the classifier, the responder and the resume
+    //! bridge at once, and they share one sandbox, one recording platform
+    //! and one fake harness.
+    //!
+    //! **Hermetic by construction.** Every case runs in its own temp
+    //! directory: the runtime directory arrives through the
+    //! [`respond_in`]/[`allocate_chat_number_in`] seams, harnesses are shell
+    //! scripts in a temp `PATH` entry discovered through
+    //! [`crate::agents::discover_in`], the continuity store is a temp SQLite
+    //! file, and the `Platform` is a recording mock. No case touches the
+    //! production runtime directory, the real config file, a real agent, a
+    //! real compositor or a real terminal.
+
+    use super::*;
+    use crate::platform::{
+        ChatLease, GitInfo, InlineImage, IoCounters, Platform, RawProcess, TerminalSpec,
+        TerminalText, WindowInfo,
+    };
+    use proptest::prelude::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    // -----------------------------------------------------------------
+    // Sandboxes
+    // -----------------------------------------------------------------
+
+    static PROP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// A private directory tree per case, unique per process *and* per case
+    /// so 100+ cases and parallel test threads never share one.
+    ///
+    /// `Drop` removes it, which matters here in a way it does not in an
+    /// example test: a failed `prop_assert!` returns early, so an explicit
+    /// clean-up at the end of the body would be skipped exactly in the runs
+    /// that produce the most files.
+    struct Sandbox {
+        root: PathBuf,
+        /// A `PATH` entry holding fake harness binaries.
+        bin_dir: PathBuf,
+        /// Stands in for the XDG data directory (the continuity store).
+        data_dir: PathBuf,
+        /// Stands in for `context::ephemeral_dir()`.
+        runtime_dir: PathBuf,
+        /// One line per fake-harness invocation.
+        log: PathBuf,
+    }
+
+    impl Sandbox {
+        fn new(tag: &str) -> Sandbox {
+            let n = PROP_SEQ.fetch_add(1, Ordering::SeqCst);
+            let root = std::env::temp_dir().join(format!(
+                "pitwall-m8-chatprop-{tag}-{}-{n}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("sandbox root");
+            Sandbox {
+                bin_dir: root.join("bin"),
+                data_dir: root.join("data"),
+                runtime_dir: root.join("run"),
+                log: root.join("harness.log"),
+                root,
+            }
+        }
+
+        /// Same, plus a fake `opencode` that records each invocation and
+        /// answers with one text event carrying `answer`.
+        fn with_harness(tag: &str, answer: &str) -> Sandbox {
+            let sandbox = Sandbox::new(tag);
+            counting_harness(&sandbox.bin_dir, "opencode", &sandbox.log, answer);
+            sandbox
+        }
+
+        fn bin_dirs(&self) -> Vec<PathBuf> {
+            vec![self.bin_dir.clone()]
+        }
+
+        fn db(&self) -> PathBuf {
+            self.data_dir.join(crate::store::DB_FILENAME)
+        }
+
+        /// The absolute project directory a descriptor captures.
+        fn project_dir(&self) -> String {
+            self.root.to_string_lossy().into_owned()
+        }
+
+        /// How many times the fake harness ran.
+        fn invocations(&self) -> usize {
+            harness_invocations(&self.log)
+        }
+
+        /// Ephemeral context documents still present in the runtime dir.
+        fn staged(&self) -> Vec<String> {
+            let Ok(entries) = std::fs::read_dir(&self.runtime_dir) else {
+                return Vec::new();
+            };
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("ctx-"))
+                .collect()
+        }
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// An executable stand-in for a harness, named exactly as
+    /// [`crate::agents::KNOWN`] expects so `discover_in` finds it.
+    ///
+    /// Every run appends one line to `log`, which is how "the harness ran
+    /// exactly once per question" becomes a count rather than an argument:
+    /// the harness is not a `Platform` capability, so a recording mock
+    /// cannot see it (see the note on `resume.rs`'s mock).
+    fn counting_harness(bin_dir: &Path, name: &str, log: &Path, answer: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(bin_dir).expect("bin dir");
+        let bin = bin_dir.join(name);
+        // Drains stdin first, so the same script stands in for a file-delivery
+        // harness (stdin is `null`, `cat` sees EOF at once) and for a
+        // stdin-delivery one (the document is consumed, so the runner's writer
+        // thread never fails).
+        let body = format!(
+            "#!/bin/sh\ncat >/dev/null 2>/dev/null\nprintf 'invocation\\n' >> '{}'\n\
+             printf '%s\\n' '{{\"type\":\"text\",\"text\":\"{}\"}}'\n",
+            log.display(),
+            answer
+        );
+        std::fs::write(&bin, body).expect("fake harness");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode 0755");
+        bin
+    }
+
+    /// A discoverable but non-executing binary: enough for argv construction,
+    /// which is pure.
+    fn fake_binary(bin_dir: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(bin_dir).expect("bin dir");
+        let bin = bin_dir.join(name);
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("fake binary");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode 0755");
+        bin
+    }
+
+    fn harness_invocations(log: &Path) -> usize {
+        std::fs::read_to_string(log)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// Does `haystack` carry `needle` as a byte substring? Used to search a
+    /// SQLite file, which is not text.
+    fn bytes_contain(haystack: &[u8], needle: &str) -> bool {
+        let needle = needle.as_bytes();
+        !needle.is_empty()
+            && haystack.len() >= needle.len()
+            && haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Every regular file under `dir`, recursively. An unreadable directory
+    /// is "nothing there", not an error.
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(files_under(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------
+    // The recording platform
+    // -----------------------------------------------------------------
+
+    /// One recorded terminal launch. The command is kept rather than
+    /// asserted away, because "no agent was started" is exactly the claim
+    /// that this vector stayed empty (26.20).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Launch {
+        directory: String,
+        command: Vec<String>,
+    }
+
+    /// A `Platform` that observes what it is told to and **records** every
+    /// acting capability the trait exposes, following `resume.rs`'s mock.
+    ///
+    /// Recording rather than panicking (as `responder_tests::QuietPlatform`
+    /// does) because two properties need a *count* of actions rather than
+    /// their absence: Property 18 asserts zero actions per non-acting turn
+    /// while still allowing an entered `/resume` to focus one window, and
+    /// Property 26 asserts "exactly one".
+    ///
+    /// `observations` counts calls to [`Platform::processes`], which
+    /// `collector::collect` makes exactly once per observation. That counter
+    /// is what makes "each harness invocation is preceded by a fresh
+    /// observation taken after its question was read" checkable.
+    struct RecordingPlatform {
+        windows: Vec<WindowInfo>,
+        processes: Vec<RawProcess>,
+        leases: Vec<ChatLease>,
+        text: TerminalText,
+        io: Option<IoCounters>,
+        fail_launch: bool,
+        fail_focus: bool,
+        launched: std::cell::RefCell<Vec<Launch>>,
+        focused: std::cell::RefCell<Vec<String>>,
+        observations: std::cell::Cell<usize>,
+    }
+
+    impl RecordingPlatform {
+        /// Observes nothing, can do nothing: the platform a refusal case
+        /// uses, where any recorded action is a failure.
+        fn quiet() -> RecordingPlatform {
+            RecordingPlatform {
+                windows: Vec::new(),
+                processes: Vec::new(),
+                leases: Vec::new(),
+                text: TerminalText::Unavailable {
+                    reason: "mock has no terminals",
+                },
+                io: None,
+                fail_launch: false,
+                fail_focus: false,
+                launched: std::cell::RefCell::new(Vec::new()),
+                focused: std::cell::RefCell::new(Vec::new()),
+                observations: std::cell::Cell::new(0),
+            }
+        }
+
+        fn with_windows(windows: Vec<WindowInfo>) -> RecordingPlatform {
+            RecordingPlatform {
+                windows,
+                ..RecordingPlatform::quiet()
+            }
+        }
+
+        /// Total acting operations recorded: window focuses plus terminal
+        /// launches. There is no process-signal capability in the trait at
+        /// all (see [`crate::platform::Platform`]), so the third operation
+        /// Property 18 names has no way to be performed from here; the only
+        /// kill anywhere on the chat path is `summary::run_agent` killing
+        /// its own timed-out child, which the harness invocation count
+        /// covers.
+        fn actions(&self) -> usize {
+            self.launched.borrow().len() + self.focused.borrow().len()
+        }
+
+        fn observations(&self) -> usize {
+            self.observations.get()
+        }
+    }
+
+    impl Platform for RecordingPlatform {
+        fn processes(&self) -> Vec<RawProcess> {
+            self.observations.set(self.observations.get() + 1);
+            self.processes.clone()
+        }
+        fn windows(&self) -> Vec<WindowInfo> {
+            self.windows.clone()
+        }
+        fn git_info(&self, _dir: &str) -> GitInfo {
+            GitInfo::default()
+        }
+        fn boot_epoch(&self) -> i64 {
+            1_700_000_000
+        }
+        fn clock_ticks_per_sec(&self) -> i64 {
+            100
+        }
+        fn hostname(&self) -> String {
+            "testbox".to_string()
+        }
+        fn launch_terminal(&self, spec: &TerminalSpec<'_>) -> Result<(), String> {
+            if self.fail_launch {
+                return Err("boom".to_string());
+            }
+            self.launched.borrow_mut().push(Launch {
+                directory: spec.directory.to_string(),
+                command: spec.command.to_vec(),
+            });
+            Ok(())
+        }
+        fn chat_leases(&self) -> Vec<ChatLease> {
+            self.leases.clone()
+        }
+        fn inline_image_capability(&self) -> InlineImage {
+            InlineImage::None
+        }
+        fn focus_window_address(&self, address: &str) -> Result<(), String> {
+            if self.fail_focus {
+                return Err("gone".to_string());
+            }
+            self.focused.borrow_mut().push(address.to_string());
+            Ok(())
+        }
+        fn process_io(&self, _pid: u32) -> Option<IoCounters> {
+            self.io
+        }
+        fn terminal_text(&self, _pid: u32, _class: &str) -> TerminalText {
+            self.text.clone()
+        }
+    }
+
+    fn window(address: &str, class: &str, title: &str, pid: u32) -> WindowInfo {
+        WindowInfo {
+            address: address.to_string(),
+            class: class.to_string(),
+            initial_class: class.to_string(),
+            title: title.to_string(),
+            workspace: "1".to_string(),
+            pid,
+        }
+    }
+
+    fn process(pid: u32, ppid: u32, command: &str, exe_name: &str, cwd: &str) -> RawProcess {
+        RawProcess {
+            pid,
+            ppid,
+            name: exe_name.to_string(),
+            command: command.to_string(),
+            exe_name: exe_name.to_string(),
+            cwd: cwd.to_string(),
+            state_code: 'S',
+            starttime_ticks: 4200,
+        }
+    }
+
+    /// A live `pitwall chat`, exactly as
+    /// [`crate::collector::is_pitwall_chat_argv`] recognises one.
+    fn chat_process(pid: u32) -> RawProcess {
+        process(pid, 1, "/usr/bin/pitwall chat", "pitwall", "/home/u")
+    }
+
+    // -----------------------------------------------------------------
+    // Shared generators and small oracles
+    // -----------------------------------------------------------------
+
+    /// Models a chat can be configured with: the empty value (the agent
+    /// default) and [`crate::summary::valid_model`] ids.
+    const MODEL_IDS: &[&str] = &["", "prov/model", "openrouter/anth-3.5", "a/b-c_d.e:f"];
+
+    /// Context labels [`ChatDescriptor::capture`] accepts: non-empty, no
+    /// control character, no title separator, within
+    /// [`MAX_CONTEXT_LABEL_CHARS`]. The padded one is deliberate — a label
+    /// that is only partly spaces must survive the title round trip
+    /// untouched.
+    const CONTEXT_LABELS: &[&str] = &[
+        "Work",
+        WORKSPACE_LABEL,
+        "my project",
+        " padded ",
+        "a",
+        "caf\u{00e9}",
+    ];
+
+    fn session_id() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("sess_[0-9a-f]{16}").expect("static regex")
+    }
+
+    fn word() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("[a-z][a-z0-9]{3,7}").expect("static regex")
+    }
+
+    /// The question of an accepted line, or a panic naming what was
+    /// classified instead.
+    fn question_of(line: &str) -> ChatQuestion {
+        match classify(line) {
+            ChatInput::Question(q) => q,
+            other => panic!("{line:?} must classify as a question, got {other:?}"),
+        }
+    }
+
+    fn descriptor_in(
+        sandbox: &Sandbox,
+        number: u16,
+        harness: &str,
+        model: &str,
+        label: &str,
+        context: Option<&str>,
+    ) -> ChatDescriptor {
+        ChatDescriptor::capture(
+            number,
+            harness,
+            model,
+            label,
+            context,
+            1_700_000_100,
+            &sandbox.project_dir(),
+        )
+        .expect("a generated descriptor must be valid by construction")
+    }
+
+    /// The per-harness argv of design §4.6's table, written out
+    /// independently of [`build_chat_call`] so the comparison is an oracle
+    /// rather than a restatement.
+    fn expected_argv(d: &ChatDescriptor, bin: &Path, ctx: &Path, message: &str) -> Vec<String> {
+        let bin_text = bin.to_string_lossy().into_owned();
+        match d.harness() {
+            "opencode" => {
+                let mut argv = vec![
+                    bin_text,
+                    "run".to_string(),
+                    "--format".to_string(),
+                    "json".to_string(),
+                    "--dir".to_string(),
+                    d.project_dir().to_string(),
+                    "-f".to_string(),
+                    ctx.to_string_lossy().into_owned(),
+                ];
+                if !d.model().is_empty() {
+                    argv.push("-m".to_string());
+                    argv.push(d.model().to_string());
+                }
+                argv.push(message.to_string());
+                argv
+            }
+            "claude" => vec![bin_text, "-p".to_string(), message.to_string()],
+            "codex" => vec![bin_text, "exec".to_string(), message.to_string()],
+            other => panic!("no argv shape recorded for harness {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Task 8.4 — Properties 7, 8 and 11
+    // -----------------------------------------------------------------
+
+    proptest! {
+        // 128 cases: the generated shape is (0..8 observed numbers) ×
+        // (0..8 live leases) × (0..3 out-of-range values) × (1..4
+        // allocations in a row) × (exhaustion checked or not).
+        #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 10.1, 10.2, 10.3, 10.5, 21.2**
+        // Feature: pitwall-chat-and-brief-ticker, Property 7: Chat numbers are the lowest available and always distinct — For any set of in-use numbers drawn from `1..=999`, the allocator returns the smallest number not in that set (formatted as three zero-padded digits), or refuses when the set is full; and for any sequence of allocations against an accumulating in-use set, no number is ever issued twice while its holder lives.
+        #[test]
+        fn prop7_chat_numbers_are_the_lowest_available_and_always_distinct(
+            observed in proptest::collection::vec(1u16..=999u16, 0..8),
+            leased in proptest::collection::vec(1u16..=999u16, 0..8),
+            out_of_range in proptest::collection::vec(
+                prop_oneof![Just(0u16), 1000u16..2000u16],
+                0..3,
+            ),
+            run_length in 1usize..4,
+            check_exhaustion in any::<bool>(),
+        ) {
+            let sandbox = Sandbox::new("p7");
+            let dir = sandbox.root.clone();
+
+            // The test process plays the role of a running chat, so a lease
+            // body carrying its own pid is correctly seen as *held*. That is
+            // what makes the accumulating half of the property meaningful:
+            // each claim leaves a real file behind, and the next allocation
+            // has to take the `EEXIST` branch and re-validate it.
+            let own = std::process::id();
+            let foreign = if own == 4242 { 4243 } else { 4242 };
+            let processes = vec![chat_process(own), chat_process(foreign)];
+
+            // The leases the observation carries: real files under the
+            // sandbox, each owned by a live `pitwall chat`.
+            for number in &leased {
+                std::fs::write(
+                    dir.join(lease_file_name(*number)),
+                    format!("{foreign}\n"),
+                )
+                .expect("sandbox lease");
+            }
+            let leases: Vec<ChatLease> = leased
+                .iter()
+                .map(|n| ChatLease { number: *n, pid: foreign })
+                .collect();
+
+            // Out-of-range values are not chat numbers at all, so they must
+            // change nothing about the answer.
+            let mut observed_numbers = observed.clone();
+            observed_numbers.extend(out_of_range.iter().copied());
+
+            let mut in_use: std::collections::BTreeSet<u16> =
+                observed.iter().copied().collect();
+            in_use.extend(leased.iter().copied());
+
+            // ---- the lowest available number, three zero-padded digits ----
+            let mut held: Vec<ChatNumberLease> = Vec::new();
+            let mut issued: Vec<u16> = Vec::new();
+            for step in 0..run_length {
+                // The oracle: the lowest number in range that neither the
+                // observation nor this run already holds.
+                let mut taken = in_use.clone();
+                taken.extend(issued.iter().copied());
+                let want = (MIN_CHAT_NUMBER..=MAX_CHAT_NUMBER)
+                    .find(|n| !taken.contains(n))
+                    .expect("at most 22 numbers are held, so one is free");
+
+                let lease = allocate_chat_number_in(
+                    &dir,
+                    &observed_numbers,
+                    &leases,
+                    &processes,
+                )
+                .expect("a free number exists");
+
+                prop_assert_eq!(lease.number(), want, "step {}", step);
+                let text = lease.number_text();
+                let want_text = format!("{want:03}");
+                prop_assert_eq!(text.as_str(), want_text.as_str());
+                prop_assert_eq!(text.chars().count(), 3);
+                prop_assert!(text.bytes().all(|b| b.is_ascii_digit()), "{}", text);
+                let path = dir.join(lease_file_name(want));
+                prop_assert_eq!(lease.path(), Some(path.as_path()));
+                prop_assert!(path.exists(), "the claim leaves its lease behind");
+                // Distinctness while the holder lives (21.2).
+                prop_assert!(
+                    !issued.contains(&want),
+                    "number {} was issued twice while its holder lives",
+                    want
+                );
+                issued.push(want);
+                held.push(lease);
+            }
+            prop_assert_eq!(issued.len(), run_length);
+            // Every number issued in this run is still held, simultaneously.
+            for number in &issued {
+                prop_assert!(dir.join(lease_file_name(*number)).exists());
+                prop_assert!(!in_use.contains(number), "an in-use number was handed out");
+            }
+            // A number the observation reported is never touched by the
+            // allocator: 10.3 falls out of availability, not bookkeeping.
+            for number in &leased {
+                prop_assert_eq!(
+                    std::fs::read_to_string(dir.join(lease_file_name(*number)))
+                        .unwrap_or_default(),
+                    format!("{foreign}\n")
+                );
+            }
+
+            // ---- a full set refuses, and claims nothing ----
+            if check_exhaustion {
+                let full = Sandbox::new("p7-full");
+                let all: Vec<u16> = (MIN_CHAT_NUMBER..=MAX_CHAT_NUMBER).collect();
+                let err = allocate_chat_number_in(&full.root, &all, &[], &processes)
+                    .expect_err("every number in use must refuse");
+                prop_assert!(err.contains("001..999"), "{}", err);
+                prop_assert_eq!(
+                    std::fs::read_dir(&full.root).expect("sandbox").count(),
+                    0,
+                    "a refusal creates nothing"
+                );
+            }
+
+            // Release in the order a chat would, before the sandbox goes.
+            drop(held);
+            for number in &issued {
+                prop_assert!(
+                    !dir.join(lease_file_name(*number)).exists(),
+                    "Drop releases every held number"
+                );
+            }
+        }
+    }
+
+    proptest! {
+        // 108 cases: 3 first harnesses × 3 second harnesses × 4 first models
+        // × ... — well above the 100 floor, and every case writes and rewrites
+        // a real config file.
+        #![proptest_config(ProptestConfig { cases: 108, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 11.3, 11.4, 21.3**
+        // Feature: pitwall-chat-and-brief-ticker, Property 8: A descriptor never changes after capture — For any Chat_Descriptor and any subsequent mutation of the Config_Store, the descriptor's fields, its rendered header, its window title and its harness argv are unchanged.
+        #[test]
+        fn prop8_a_descriptor_never_changes_after_capture(
+            first_agent_ix in 0usize..crate::agents::KNOWN.len(),
+            second_agent_ix in 0usize..crate::agents::KNOWN.len(),
+            first_model_ix in 0usize..MODEL_IDS.len(),
+            second_model_ix in 0usize..MODEL_IDS.len(),
+            number in 1u16..=999u16,
+            label_ix in 0usize..CONTEXT_LABELS.len(),
+            context in proptest::option::of(session_id()),
+            epoch in 0i64..2_000_000_000i64,
+            summary_enabled in any::<bool>(),
+        ) {
+            // **The honest form chosen here.** Requirement 11.4 talks about a
+            // Config_Store mutation, and `chat.rs` deliberately never reads
+            // one — so "mutate the Config_Store" is performed for real,
+            // through `config::save_to` on a *sandbox* config file, and the
+            // property is stated as: the mutation demonstrably lands (the
+            // store reloads with the new values) and the descriptor captured
+            // before it is byte-identical afterwards, field by field, and so
+            // are its title, its header and its harness argv. The structural
+            // half — that there is no code path by which a running chat could
+            // re-read the store — is asserted below against the module's own
+            // production source, which is the strongest form available from
+            // inside the module.
+            let sandbox = Sandbox::new("p8");
+            let config_path = sandbox.root.join("config/pitwall/config");
+            let first_agent = crate::agents::KNOWN[first_agent_ix].id;
+            let second_agent = crate::agents::KNOWN[second_agent_ix].id;
+            let first_model = MODEL_IDS[first_model_ix];
+            let second_model = MODEL_IDS[second_model_ix];
+
+            let mut cfg = crate::config::Config::default();
+            cfg.set(crate::config::KEY_AGENT, first_agent).expect("a known agent");
+            cfg.set(crate::config::KEY_MODEL, first_model).expect("a valid model");
+            cfg.set(
+                crate::config::KEY_SUMMARY_ENABLED,
+                if summary_enabled { "true" } else { "false" },
+            )
+            .expect("a boolean toggle");
+            crate::config::save_to(&config_path, &cfg).expect("sandbox config");
+
+            // The one read, exactly as `cmd_chat` performs it at startup.
+            let at_capture = crate::config::load_from(&config_path);
+            let d = ChatDescriptor::capture(
+                number,
+                &at_capture.agent,
+                &at_capture.model,
+                CONTEXT_LABELS[label_ix],
+                context.as_deref(),
+                epoch,
+                &sandbox.project_dir(),
+            )
+            .expect("the configured values are valid by construction");
+
+            // Everything a later stage can observe about this descriptor.
+            let fields_before = (
+                d.number(),
+                d.number_text(),
+                d.harness().to_string(),
+                d.model().to_string(),
+                d.model_label().to_string(),
+                d.context_label().to_string(),
+                d.context_session_id().map(str::to_string),
+                d.started_at_epoch(),
+                d.project_dir().to_string(),
+            );
+            let title_before = format_title(&d);
+            let header_before = render_header(&d, Palette::plain());
+            let header_fields_before = header_fields(&d);
+            let bin = sandbox.bin_dir.join(crate::agents::KNOWN[first_agent_ix].binary);
+            let ctx = sandbox.runtime_dir.join("ctx-1-0123456789abcdef.json");
+            let message = chat_message(&question_of("what is running?"));
+            let argv_before = build_chat_call(&d, &bin, &ctx, &message)
+                .expect("every known harness has a delivery row")
+                .argv()
+                .to_vec();
+
+            // ---- mutate the Config_Store ----
+            let mut mutated = crate::config::load_from(&config_path);
+            mutated.set(crate::config::KEY_AGENT, second_agent).expect("a known agent");
+            mutated.set(crate::config::KEY_MODEL, second_model).expect("a valid model");
+            mutated
+                .set(
+                    crate::config::KEY_SUMMARY_ENABLED,
+                    if summary_enabled { "false" } else { "true" },
+                )
+                .expect("a boolean toggle");
+            crate::config::save_to(&config_path, &mutated).expect("config mutation");
+
+            // The mutation really landed; otherwise this property would prove
+            // nothing at all.
+            let after_mutation = crate::config::load_from(&config_path);
+            prop_assert_eq!(after_mutation.agent.as_str(), second_agent);
+            prop_assert_eq!(after_mutation.model.as_str(), second_model);
+            prop_assert_ne!(after_mutation.summary_enabled, at_capture.summary_enabled);
+
+            // ---- and the descriptor did not move ----
+            let fields_after = (
+                d.number(),
+                d.number_text(),
+                d.harness().to_string(),
+                d.model().to_string(),
+                d.model_label().to_string(),
+                d.context_label().to_string(),
+                d.context_session_id().map(str::to_string),
+                d.started_at_epoch(),
+                d.project_dir().to_string(),
+            );
+            prop_assert_eq!(fields_after, fields_before);
+            let title_after = format_title(&d);
+            prop_assert_eq!(title_after.as_str(), title_before.as_str());
+            let header_after = render_header(&d, Palette::plain());
+            prop_assert_eq!(header_after.as_str(), header_before.as_str());
+            prop_assert_eq!(header_fields(&d), header_fields_before);
+            prop_assert_eq!(
+                build_chat_call(&d, &bin, &ctx, &message)
+                    .expect("still a known harness")
+                    .argv()
+                    .to_vec(),
+                argv_before
+            );
+            // It still carries what the store said *at capture*, which is a
+            // different value whenever the mutation was not a no-op (11.5:
+            // the changed value belongs to the next chat, not this one).
+            prop_assert_eq!(d.harness(), at_capture.agent.as_str());
+            prop_assert_eq!(d.model(), at_capture.model.as_str());
+            if first_agent != second_agent {
+                prop_assert_ne!(d.harness(), after_mutation.agent.as_str());
+            }
+            if first_model != second_model {
+                prop_assert_ne!(d.model(), after_mutation.model.as_str());
+            }
+
+            // The structural half: the module's production half names no
+            // config reader, so no running chat can reach one (11.3, 11.4).
+            const MODULE_SOURCE: &str = include_str!("chat.rs");
+            let production = MODULE_SOURCE
+                .split("#[cfg(test)]")
+                .next()
+                .expect("the module has a production half");
+            prop_assert!(
+                !production.contains("crate::config"),
+                "chat.rs must contain no config read"
+            );
+        }
+    }
+
+    /// A string that is deliberately **not** a Chat_Title_Grammar title, one
+    /// near miss per shape. Each is rejected by a different clause of
+    /// [`parse_title`]; the property proves that claim rather than assuming
+    /// it.
+    fn malformed_title(
+        shape: usize,
+        number: u16,
+        harness: &str,
+        model_label: &str,
+        label: &str,
+    ) -> String {
+        let sep = TITLE_SEPARATOR;
+        match shape {
+            // Four digits, never three.
+            0 => format!("{CHAT_LABEL} {number:04}{sep}{harness}{sep}{model_label}{sep}{label}"),
+            // Hyphen separators: the title then has one field, not four.
+            1 => format!("{CHAT_LABEL} {number:03} - {harness} - {model_label} - {label}"),
+            // A harness that is not a `crate::agents::KNOWN` id.
+            2 => format!("{CHAT_LABEL} {number:03}{sep}notaharness{sep}{model_label}{sep}{label}"),
+            // An empty context label.
+            3 => format!("{CHAT_LABEL} {number:03}{sep}{harness}{sep}{model_label}{sep}"),
+            // The reserved literal, mis-cased.
+            4 => format!("Pitwall chat {number:03}{sep}{harness}{sep}{model_label}{sep}{label}"),
+            // Five fields.
+            5 => format!(
+                "{CHAT_LABEL} {number:03}{sep}{harness}{sep}{model_label}{sep}{label}{sep}extra"
+            ),
+            // A model that is neither the agent-default literal nor valid.
+            6 => format!("{CHAT_LABEL} {number:03}{sep}{harness}{sep}bad model{sep}{label}"),
+            // A control character anywhere.
+            7 => format!(
+                "{CHAT_LABEL} {number:03}{sep}{harness}{sep}{model_label}{sep}{label}\u{0007}"
+            ),
+            // Not a title at all.
+            _ => "user@host:~".to_string(),
+        }
+    }
+
+    proptest! {
+        // 216 cases: 3 harnesses × 5 model shapes × 8 label shapes × 9
+        // malformed shapes is 1080 combinations, so 216 samples each shape
+        // many times over while keeping the run cheap (the whole test is
+        // pure apart from one sandbox directory per case).
+        #![proptest_config(ProptestConfig { cases: 216, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 16.2, 16.3, 16.4, 17.5**
+        // Feature: pitwall-chat-and-brief-ticker, Property 11: Title formatting and parsing are inverses — For any Chat_Descriptor, `parse_title(format_title(d))` yields the same number, harness, model and context label; and for any string that is not a well-formed Pitwall Chat title, `parse_title` yields nothing.
+        #[test]
+        fn prop11_title_formatting_and_parsing_are_inverses(
+            number in 1u16..=999u16,
+            harness_ix in 0usize..crate::agents::KNOWN.len(),
+            model_ix in 0usize..(MODEL_IDS.len() + 1),
+            label_shape in 0usize..(CONTEXT_LABELS.len() + 2),
+            malformed_shape in 0usize..9,
+        ) {
+            let sandbox = Sandbox::new("p11");
+            let harness = crate::agents::KNOWN[harness_ix].id;
+            // The extra model index is the longest id `valid_model` accepts
+            // (128 ASCII characters) — the only case that makes the
+            // 200-character title cap bite.
+            let long_model = format!("p/{}", "a".repeat(126));
+            let model = if model_ix == MODEL_IDS.len() {
+                long_model.as_str()
+            } else {
+                MODEL_IDS[model_ix]
+            };
+            // The extra label shapes are the longest label `capture` accepts
+            // and the longest one that is always emitted whole (39).
+            let longest_label = "L".repeat(MAX_CONTEXT_LABEL_CHARS);
+            let widest_safe_label = "M".repeat(39);
+            let label = match label_shape {
+                i if i < CONTEXT_LABELS.len() => CONTEXT_LABELS[i],
+                i if i == CONTEXT_LABELS.len() => longest_label.as_str(),
+                _ => widest_safe_label.as_str(),
+            };
+            let d = ChatDescriptor::capture(
+                number,
+                harness,
+                model,
+                label,
+                None,
+                0,
+                &sandbox.project_dir(),
+            )
+            .expect("a generated descriptor is valid by construction");
+
+            // ---- forward: every identity field comes back ----
+            let title = format_title(&d);
+            prop_assert!(
+                title.chars().count() <= MAX_CHAT_TITLE_CHARS,
+                "{} characters: {}",
+                title.chars().count(),
+                title
+            );
+            let parsed = parse_title(&title).expect("a formatted title must parse");
+            prop_assert_eq!(parsed.number(), d.number());
+            prop_assert_eq!(parsed.number_text(), d.number_text());
+            prop_assert_eq!(parsed.harness(), d.harness());
+            prop_assert_eq!(parsed.model(), d.model());
+            // 16.3: an empty model presents as the agent-default literal on
+            // the way out and parses back to empty on the way in.
+            prop_assert_eq!(parsed.model_label(), d.model_label());
+            prop_assert_eq!(d.model().is_empty(), title.contains(AGENT_DEFAULT_LABEL));
+
+            // The one field the formatter may shorten is the context label,
+            // and only to hold the title cap — so the inverse claim for it is
+            // stated against `title_context_label`, which *is* what the
+            // formatter emitted. Everything else is exact.
+            let emitted_label = title_context_label(&d);
+            prop_assert_eq!(parsed.context_label(), emitted_label.as_str());
+            prop_assert!(
+                d.context_label().starts_with(parsed.context_label()),
+                "the label may lose its tail, never change: {:?} vs {:?}",
+                d.context_label(),
+                parsed.context_label()
+            );
+            // 16.4: a chat with no context session carries the workspace
+            // literal, and the title says so.
+            if d.context_session_id().is_none() && d.context_label() == WORKSPACE_LABEL {
+                prop_assert_eq!(parsed.context_label(), WORKSPACE_LABEL);
+            }
+
+            // ---- the unconditional exact inverse ----
+            let rendered = parsed.render();
+            prop_assert_eq!(rendered.as_str(), title.as_str());
+            prop_assert_eq!(parse_title(&rendered), Some(parsed.clone()));
+
+            // ---- backward: nothing that is not the grammar parses ----
+            let malformed = malformed_title(
+                malformed_shape,
+                number,
+                harness,
+                d.model_label(),
+                parsed.context_label(),
+            );
+            prop_assert_ne!(malformed.as_str(), title.as_str());
+            prop_assert!(
+                parse_title(&malformed).is_none(),
+                "must yield nothing for {:?}",
+                malformed
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Task 9.5 — Properties 14, 15, 17, 18 and 19
+    //
+    // Properties 14 and 18 quantify over a *sequence of chat inputs*, so
+    // they need the input loop. The loop itself is `main.rs`'s `chat_loop`
+    // (design §4.6), which cannot be called from a library test; [`drive`]
+    // below is its dispatch table, arm for arm, over the `_in` seams — the
+    // same classification, the same single caller of the resume bridge, the
+    // same observe-then-respond order, and no other way to reach either.
+    // -----------------------------------------------------------------
+
+    /// The input kinds a human can type, one representative each. Indexes
+    /// into this table are what the generators sample.
+    const INPUT_KINDS: usize = 13;
+
+    /// `/resume` with no argument.
+    const KIND_RESUME_BARE: usize = 6;
+    /// `/resume <target>`.
+    const KIND_RESUME_TARGET: usize = 7;
+    /// A *question* whose wording asks for a session to be resumed.
+    const KIND_RESUME_WORDING: usize = 10;
+
+    fn input_line(kind: usize, marker: &str, target: &str) -> String {
+        match kind {
+            0 => String::new(),
+            1 => "   \t ".to_string(),
+            2 => "/help".to_string(),
+            3 => "/context".to_string(),
+            4 => "/sessions".to_string(),
+            5 => "/clear".to_string(),
+            KIND_RESUME_BARE => "/resume".to_string(),
+            KIND_RESUME_TARGET => format!("/resume {target}"),
+            8 => "/nope --now".to_string(),
+            9 => format!("what is {marker} doing?"),
+            KIND_RESUME_WORDING => format!("please resume {target} for me, {marker}"),
+            11 => format!("{}?", "a".repeat(MAX_CHAT_QUESTION_CHARS)),
+            _ => "/exit".to_string(),
+        }
+    }
+
+    /// The class each kind must produce — taken from the generation choice,
+    /// never from a second reading of the classifier.
+    fn expected_class(kind: usize) -> &'static str {
+        match kind {
+            0 | 1 => "blank",
+            2..=5 => "info",
+            KIND_RESUME_BARE | KIND_RESUME_TARGET => "act",
+            8 => "unknown",
+            9 | KIND_RESUME_WORDING => "question",
+            11 => "too-long",
+            _ => "end",
+        }
+    }
+
+    /// How many inputs of `kinds` a loop actually processes: `/exit` returns,
+    /// so everything after it is never read.
+    fn processed_len(kinds: &[usize]) -> usize {
+        kinds
+            .iter()
+            .position(|k| expected_class(*k) == "end")
+            .map_or(kinds.len(), |i| i + 1)
+    }
+
+    const CLASSES: &[&str] = &[
+        "blank",
+        "info",
+        "act",
+        "end",
+        "unknown",
+        "question",
+        "too-long",
+    ];
+
+    fn class_name(input: &ChatInput) -> &'static str {
+        match input {
+            ChatInput::Blank => "blank",
+            ChatInput::Info(_) => "info",
+            ChatInput::Act(_) => "act",
+            ChatInput::End => "end",
+            ChatInput::Unknown { .. } => "unknown",
+            ChatInput::Question(_) => "question",
+            ChatInput::QuestionTooLong { .. } => "too-long",
+        }
+    }
+
+    /// The five classes Property 19 names, plus the two refinements
+    /// [`classify`] documents: `Blank` is "no input at all" (neither a
+    /// command nor a question), and `QuestionTooLong` is the Chat_Question
+    /// class refused rather than truncated.
+    const SPEC_CLASSES: &[&str] = &[
+        "informational command",
+        "resume command",
+        "end command",
+        "unknown command",
+        "chat question",
+        "no input",
+    ];
+
+    fn spec_class(input: &ChatInput) -> &'static str {
+        match input {
+            ChatInput::Info(_) => "informational command",
+            ChatInput::Act(_) => "resume command",
+            ChatInput::End => "end command",
+            ChatInput::Unknown { .. } => "unknown command",
+            ChatInput::Question(_) | ChatInput::QuestionTooLong { .. } => "chat question",
+            ChatInput::Blank => "no input",
+        }
+    }
+
+    /// What one driven turn did.
+    struct TurnRecord {
+        input: String,
+        class: &'static str,
+        /// Fake-harness invocations attributable to this turn.
+        harness_calls: usize,
+        /// [`resume_action`] calls attributable to this turn.
+        resume_attempts: usize,
+        /// Window focuses plus terminal launches during this turn.
+        actions: usize,
+        /// Did a fresh observation happen after this line was read and before
+        /// the harness ran? Only meaningful for a question.
+        observed_before_call: bool,
+    }
+
+    struct DriveOutcome {
+        turns: Vec<TurnRecord>,
+        conversation: Conversation,
+    }
+
+    /// Run the input loop's dispatch table over `lines`.
+    ///
+    /// Arm for arm identical to `main.rs`'s `chat_loop`: `Blank` re-prompts,
+    /// the informational arm observes read-only, the `Act` arm is the only
+    /// caller of [`resume_action`], `End` returns, `Unknown` prints the
+    /// vocabulary, and the question arm observes and then calls
+    /// [`respond_in`] — which receives no platform, no database path and no
+    /// resume handle, so it cannot act whatever the answer says.
+    fn drive(
+        plat: &RecordingPlatform,
+        d: &ChatDescriptor,
+        sandbox: &Sandbox,
+        lines: &[String],
+    ) -> DriveOutcome {
+        let db = sandbox.db();
+        let bin_dirs = sandbox.bin_dirs();
+        let mut conversation = Conversation::new();
+        let mut turns: Vec<TurnRecord> = Vec::new();
+        let at = 1_700_000_200;
+
+        for line in lines {
+            let calls_before = sandbox.invocations();
+            let actions_before = plat.actions();
+            let observations_at_read = plat.observations();
+            let mut resume_attempts = 0usize;
+            let mut observed_before_call = false;
+            let mut ended = false;
+
+            let class = match classify(line) {
+                ChatInput::Blank => "blank",
+                ChatInput::Info(cmd) => {
+                    match cmd {
+                        InfoCommand::Help => {
+                            conversation.record(Role::Pitwall, at, &render_vocabulary());
+                        }
+                        InfoCommand::Context => {
+                            let observation = observe(plat, d, &sandbox.data_dir);
+                            let mut text = context_block(d).join("\n");
+                            text.push('\n');
+                            text.push_str(observation.document());
+                            conversation.record(Role::Pitwall, at, &text);
+                        }
+                        InfoCommand::Sessions => {
+                            let scope = scope_to_context(
+                                d.context_session_id(),
+                                crate::collector::collect(plat),
+                                Vec::new(),
+                                Vec::new(),
+                                Vec::new(),
+                                Vec::new(),
+                            );
+                            let ids: Vec<&str> = scope
+                                .snapshot()
+                                .sessions
+                                .iter()
+                                .map(|s| s.id.as_str())
+                                .collect();
+                            conversation.record(Role::Pitwall, at, &ids.join("\n"));
+                        }
+                        InfoCommand::Clear => conversation.clear(),
+                    }
+                    "info"
+                }
+                ChatInput::Act(ActionCommand::Resume { target }) => {
+                    resume_attempts += 1;
+                    let report = resume_action(plat, &db, d, target.as_deref());
+                    conversation.record(Role::Pitwall, at, &resume_line(&report));
+                    "act"
+                }
+                ChatInput::End => {
+                    ended = true;
+                    "end"
+                }
+                ChatInput::Unknown { entered } => {
+                    conversation.record(Role::Pitwall, at, &unknown_command_message(&entered));
+                    "unknown"
+                }
+                ChatInput::Question(question) => {
+                    conversation.record(Role::You, at, question.text());
+                    let observation = observe(plat, d, &sandbox.data_dir);
+                    observed_before_call = plat.observations() > observations_at_read;
+                    let answer = match respond_in(
+                        d,
+                        &observation,
+                        &question,
+                        &sandbox.runtime_dir,
+                        &bin_dirs,
+                        Duration::from_secs(20),
+                    ) {
+                        Ok(answer) => answer,
+                        Err(e) => e.message(),
+                    };
+                    conversation.record(Role::Pitwall, at, &answer);
+                    "question"
+                }
+                ChatInput::QuestionTooLong { chars } => {
+                    conversation.record(
+                        Role::Pitwall,
+                        at,
+                        &format!("that question is {chars} characters; nothing was sent."),
+                    );
+                    "too-long"
+                }
+            };
+
+            turns.push(TurnRecord {
+                input: line.clone(),
+                class,
+                harness_calls: sandbox.invocations() - calls_before,
+                resume_attempts,
+                actions: plat.actions() - actions_before,
+                observed_before_call,
+            });
+            if ended {
+                break;
+            }
+        }
+
+        DriveOutcome {
+            turns,
+            conversation,
+        }
+    }
+
+    proptest! {
+        // 100 cases (the floor): each case drives 1..4 inputs through the
+        // real dispatch table and spawns the fake harness once per generated
+        // question, so the case count is held at the minimum the design
+        // requires rather than inflated.
+        #![proptest_config(ProptestConfig { cases: 100, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 12.5, 12.6, 12.7**
+        // Feature: pitwall-chat-and-brief-ticker, Property 14: The harness runs once per question and never otherwise — For any sequence of chat inputs, the number of harness invocations equals the number of Chat_Questions in that sequence, and each invocation is preceded by a fresh observation taken after its question was read.
+        #[test]
+        fn prop14_the_harness_runs_once_per_question_and_never_otherwise(
+            kinds in proptest::collection::vec(0usize..INPUT_KINDS, 1..5),
+            marker in word(),
+            target in session_id(),
+        ) {
+            let answer = format!("answer-{marker}");
+            let sandbox = Sandbox::with_harness("p14", &answer);
+            let plat = RecordingPlatform::quiet();
+            let d = descriptor_in(&sandbox, 5, "opencode", "", WORKSPACE_LABEL, None);
+
+            // Startup: a descriptor, a header, a title. No harness (12.6).
+            let _ = render_header(&d, Palette::plain());
+            prop_assert_eq!(sandbox.invocations(), 0, "starting a chat runs no harness");
+
+            let lines: Vec<String> = kinds
+                .iter()
+                .map(|k| input_line(*k, &marker, &target))
+                .collect();
+            let run = drive(&plat, &d, &sandbox, &lines);
+
+            // `/exit` ends the loop, so the turns processed are the inputs up
+            // to and including it.
+            prop_assert_eq!(run.turns.len(), processed_len(&kinds));
+
+            for (record, kind) in run.turns.iter().zip(kinds.iter()) {
+                prop_assert_eq!(
+                    record.class,
+                    expected_class(*kind),
+                    "{:?} was classified {}",
+                    record.input,
+                    record.class
+                );
+                // One invocation for a question, none for anything else: no
+                // timer, no background run, no second call (12.6, 12.7).
+                prop_assert_eq!(
+                    record.harness_calls,
+                    usize::from(record.class == "question"),
+                    "{:?} ran the harness {} time(s)",
+                    record.input,
+                    record.harness_calls
+                );
+                if record.class == "question" {
+                    // 12.5: the observation is taken *after* the question was
+                    // read and before the harness is invoked.
+                    prop_assert!(
+                        record.observed_before_call,
+                        "{:?} answered without a fresh observation",
+                        record.input
+                    );
+                }
+            }
+
+            let questions = run.turns.iter().filter(|t| t.class == "question").count();
+            prop_assert_eq!(sandbox.invocations(), questions);
+            // Every question got that harness's answer back, so the counted
+            // invocations are the ones that actually answered.
+            let answered = run
+                .conversation
+                .turns()
+                .iter()
+                .filter(|t| t.role() == Role::Pitwall && t.text() == answer.as_str())
+                .count();
+            prop_assert_eq!(answered, questions);
+            // 12.8: nothing staged outlives the run, on any path.
+            prop_assert!(sandbox.staged().is_empty(), "{:?}", sandbox.staged());
+        }
+    }
+
+    /// Fragments a hostile question can be assembled from: shell
+    /// metacharacters, flag-shaped words, absolute paths, a newline, a tab
+    /// and quoting. None of them may become argv structure.
+    const HOSTILE_FRAGMENTS: &[&str] = &[
+        "; rm -rf ~",
+        "&& id",
+        "| sh",
+        "$(id)",
+        "`id`",
+        "--dir /etc",
+        "-m other/model",
+        "/etc/passwd",
+        "\n--format json\n",
+        "\t-f /run/user/0/pitwall/ctx-1-a.json",
+        "'\"quoted\"'",
+        "sh -c 'echo hi'",
+        "-p",
+    ];
+
+    proptest! {
+        // 192 cases: 3 harnesses × 4 models × 13 hostile fragments in 1..5
+        // positions. Pure — argv construction spawns nothing.
+        #![proptest_config(ProptestConfig { cases: 192, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 14.1, 14.2, 14.4, 27.4**
+        // Feature: pitwall-chat-and-brief-ticker, Property 15: The question is contained in one argv element — For any question string — including shell metacharacters, leading hyphens, newlines and absolute paths — the harness argv gains exactly one element derived from it, that element begins with the fixed chat instruction, contains no control characters, is capped at the question character limit, and no additional flag, path or element appears; argv[0] is an absolute discovered binary and no element invokes a shell.
+        #[test]
+        fn prop15_the_question_is_contained_in_one_argv_element(
+            marker in word(),
+            fragment_ixs in proptest::collection::vec(0usize..HOSTILE_FRAGMENTS.len(), 1..5),
+            harness_ix in 0usize..crate::agents::KNOWN.len(),
+            model_ix in 0usize..MODEL_IDS.len(),
+            trailing_spaces in 0usize..3,
+        ) {
+            let sandbox = Sandbox::new("p15");
+            let harness = crate::agents::KNOWN[harness_ix].id;
+            let binary_name = crate::agents::KNOWN[harness_ix].binary;
+            let planted = fake_binary(&sandbox.bin_dir, binary_name);
+
+            // argv[0] is whatever `discover_in` found on the search path —
+            // never a caller-supplied string.
+            let discovered = crate::agents::discover_in(&sandbox.bin_dirs())
+                .into_iter()
+                .find(|a| a.id == harness)
+                .and_then(|a| a.path)
+                .expect("a planted harness is discovered");
+            prop_assert_eq!(discovered.as_path(), planted.as_path());
+            prop_assert!(discovered.is_absolute(), "argv[0]: {:?}", discovered);
+
+            // A question that begins with a letter (so it can never be a
+            // command) and then carries every hostile shape at once.
+            let mut text = marker.clone();
+            for ix in &fragment_ixs {
+                text.push(' ');
+                text.push_str(HOSTILE_FRAGMENTS[*ix]);
+            }
+            text.push_str(&" ".repeat(trailing_spaces));
+            let question = question_of(&text);
+            let message = chat_message(&question);
+            let ctx = sandbox.runtime_dir.join("ctx-1-0123456789abcdef.json");
+            let d = descriptor_in(&sandbox, 3, harness, MODEL_IDS[model_ix], "Work", None);
+            let call = build_chat_call(&d, &discovered, &ctx, &message)
+                .expect("every known harness has a delivery row");
+            let argv = call.argv().to_vec();
+
+            // ---- exactly one element is derived from the question ----
+            prop_assert_eq!(
+                argv.iter().filter(|a| a.contains(marker.as_str())).count(),
+                1,
+                "{:?}",
+                argv
+            );
+            prop_assert_eq!(argv.last().map(String::as_str), Some(message.as_str()));
+            prop_assert!(message.starts_with(CHAT_INSTRUCTION));
+            prop_assert!(message.contains(question.text()));
+            for element in argv.iter().take(argv.len() - 1) {
+                prop_assert!(
+                    !element.contains(question.text()),
+                    "the question leaked into {:?}",
+                    element
+                );
+            }
+
+            // ---- no additional flag, path or element appears ----
+            // The oracle is design §4.6's table written out independently, so
+            // "fixed" is compared against the fixed thing rather than
+            // re-derived from the code under test.
+            prop_assert_eq!(argv.clone(), expected_argv(&d, &discovered, &ctx, &message));
+            // Every element before the message is either the discovered
+            // binary or a literal from that table — never anything the human
+            // typed (14.4).
+            const FIXED: &[&str] = &["run", "--format", "json", "--dir", "-f", "-m", "-p", "exec"];
+            for element in argv.iter().skip(1).take(argv.len() - 2) {
+                let is_fixed = FIXED.contains(&element.as_str())
+                    || element.as_str() == d.project_dir()
+                    || element.as_str() == d.model()
+                    || Path::new(element) == ctx.as_path();
+                prop_assert!(is_fixed, "unexpected argv element {:?} in {:?}", element, argv);
+            }
+
+            // ---- the element carries no control character that could
+            // re-enter an escape sequence ----
+            // `context::strip_controls` deliberately keeps `\n` and `\t`:
+            // they are content a human typed, not escapes. Those two are
+            // therefore the only controls the element may carry, and an
+            // `ESC`, `BEL` or `NUL` may not survive at all.
+            for c in message.chars().filter(|c| c.is_control()) {
+                prop_assert!(c == '\n' || c == '\t', "control {:?} reached argv", c);
+            }
+            prop_assert!(!message.contains('\u{1b}'), "ESC reached argv");
+            prop_assert!(!message.contains('\u{7}'), "BEL reached argv");
+            prop_assert!(!message.contains('\0'), "NUL reached argv");
+
+            // ---- the cap ----
+            prop_assert!(question.chars() >= 1);
+            prop_assert!(question.chars() <= MAX_CHAT_QUESTION_CHARS);
+
+            // ---- argv[0] is the discovered binary and nothing is a shell ----
+            let discovered_text = discovered.to_string_lossy().into_owned();
+            prop_assert_eq!(argv[0].as_str(), discovered_text.as_str());
+            prop_assert_eq!(
+                discovered.file_name().and_then(|n| n.to_str()),
+                Some(binary_name)
+            );
+            for element in argv.iter().take(argv.len() - 1) {
+                prop_assert!(
+                    !matches!(
+                        element.as_str(),
+                        "sh" | "bash" | "zsh" | "dash" | "-c" | "/bin/sh" | "/bin/bash"
+                    ),
+                    "{:?} would invoke a shell",
+                    element
+                );
+            }
+
+            // ---- the document never travels in argv ----
+            let staged = ctx.to_string_lossy().into_owned();
+            let path_in_argv = argv.iter().any(|a| a.contains(&staged));
+            prop_assert_eq!(path_in_argv, !call.context_on_stdin());
+        }
+    }
+
+    proptest! {
+        // 160 cases over 1..7 events drawn from four kinds (tool call,
+        // metadata, text with content, text without) — pure, no harness runs.
+        #![proptest_config(ProptestConfig { cases: 160, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 13.5, 13.7**
+        // Feature: pitwall-chat-and-brief-ticker, Property 17: Only text events survive extraction — For any interleaving of tool-call, metadata and text events in harness output, the presented answer contains no tool-call payload and no metadata field, and is empty when no text event carries content.
+        #[test]
+        fn prop17_only_text_events_survive_extraction(
+            kinds in proptest::collection::vec(0usize..4, 1..7),
+            marker in word(),
+            trailing_newline in any::<bool>(),
+        ) {
+            // Three markers with distinct prefixes, so no assertion can be
+            // satisfied by accident through a shared substring.
+            let tool_marker = format!("tool{marker}");
+            let meta_marker = format!("meta{marker}");
+            let text_marker = format!("text{marker}");
+
+            let mut raw = String::new();
+            let mut expected: Vec<String> = Vec::new();
+            for (i, kind) in kinds.iter().enumerate() {
+                match kind {
+                    // A tool call: its payload is the thing that must never
+                    // be presented.
+                    0 => raw.push_str(&format!(
+                        "{{\"type\":\"tool\",\"name\":\"bash\",\"input\":\"{tool_marker}-{i} rm -rf /\"}}\n"
+                    )),
+                    // Metadata: counters and cost, no text-bearing field.
+                    1 => raw.push_str(&format!(
+                        "{{\"type\":\"meta\",\"tokens\":{i},\"cost\":\"{meta_marker}-{i}\"}}\n"
+                    )),
+                    // A text event carrying content.
+                    2 => {
+                        let body = format!("{text_marker}-{i}");
+                        raw.push_str(&format!("{{\"type\":\"text\",\"text\":\"{body}\"}}\n"));
+                        expected.push(body);
+                    }
+                    // A text event carrying nothing.
+                    _ => raw.push_str("{\"type\":\"text\",\"text\":\"   \"}\n"),
+                }
+            }
+            if trailing_newline {
+                raw.push('\n');
+            }
+
+            let answer = present_answer(&crate::summary::extract_summary_text(&raw));
+
+            // ---- no tool-call payload, no metadata field ----
+            prop_assert!(!answer.contains(tool_marker.as_str()), "{answer}");
+            prop_assert!(!answer.contains(meta_marker.as_str()), "{answer}");
+            prop_assert!(!answer.contains("rm -rf"), "{answer}");
+            prop_assert!(!answer.contains("tokens"), "{answer}");
+            prop_assert!(!answer.contains("\"type\""), "{answer}");
+            prop_assert!(!answer.contains("bash"), "{answer}");
+
+            // ---- exactly the text events that carried content, in order ----
+            let want_answer = expected.join("\n");
+            prop_assert_eq!(answer.as_str(), want_answer.as_str());
+            // ---- and empty exactly when none did (13.5) ----
+            prop_assert_eq!(answer.is_empty(), expected.is_empty());
+        }
+    }
+
+    proptest! {
+        // 100 cases (the floor): each drives 1..4 inputs, opens a real
+        // continuity store for the executor's Level 2 lookup and spawns the
+        // fake harness once per generated question.
+        #![proptest_config(ProptestConfig { cases: 100, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 14.5, 14.6, 14.10, 26.2, 26.3, 26.4, 26.5, 26.6, 27.1, 27.2, 27.3, 27.10**
+        // Feature: pitwall-chat-and-brief-ticker, Property 18: Workspace state changes only from an entered resume command — For any sequence of chat inputs, the number of Resume_Action attempts equals the number of explicitly entered resume commands in that sequence, and the count of observed window-focus, terminal-launch and process-signal operations attributable to Chat_Questions, chat startup and context refreshes is zero — regardless of question wording, including wording that asks for a session to be resumed.
+        #[test]
+        fn prop18_workspace_state_changes_only_from_an_entered_resume_command(
+            kinds in proptest::collection::vec(0usize..INPUT_KINDS, 1..5),
+            marker in word(),
+            unknown_target in session_id(),
+            target_shape in 0usize..3,
+        ) {
+            let answer = format!("answer-{marker}");
+            let sandbox = Sandbox::with_harness("p18", &answer);
+            // One observed window, so a `/resume` that names it can actually
+            // focus something: "zero actions from a question" is a weaker
+            // claim on a platform where nothing is focusable.
+            let plat = RecordingPlatform::with_windows(vec![window(
+                "0x1",
+                "foot",
+                "user@host:~",
+                100,
+            )]);
+            let live = crate::collector::collect(&plat)
+                .sessions
+                .first()
+                .map(|s| s.id.clone())
+                .expect("one observed window is one session");
+
+            // The target an entered `/resume <id>` carries: the live session
+            // (focus succeeds), a valid-shaped session nothing knows about
+            // (the executor refuses), or a malformed one (the bridge refuses
+            // before the executor).
+            let target = match target_shape {
+                0 => live.clone(),
+                1 => unknown_target.clone(),
+                _ => format!("not-a-session-{marker}"),
+            };
+
+            // ---- chat startup starts no Resume_Action attempt (26.5) ----
+            let d = descriptor_in(&sandbox, 6, "opencode", "", WORKSPACE_LABEL, None);
+            let _ = render_header(&d, Palette::plain());
+            let _ = plan_branding(plat.inline_image_capability(), None);
+            prop_assert_eq!(plat.actions(), 0, "starting a chat changes nothing");
+
+            let lines: Vec<String> = kinds
+                .iter()
+                .map(|k| input_line(*k, &marker, &target))
+                .collect();
+            let run = drive(&plat, &d, &sandbox, &lines);
+            prop_assert_eq!(run.turns.len(), processed_len(&kinds));
+
+            let mut expected_actions = 0usize;
+            for (record, kind) in run.turns.iter().zip(kinds.iter()) {
+                prop_assert_eq!(record.class, expected_class(*kind), "{:?}", record.input);
+                if record.class == "act" {
+                    // Exactly one attempt per entered resume command (26.2).
+                    prop_assert_eq!(record.resume_attempts, 1, "{:?}", record.input);
+                    // `/resume` alone has no target in a workspace-scoped
+                    // chat, so it refuses without reaching the executor;
+                    // `/resume <live id>` focuses exactly one window.
+                    let acts = *kind == KIND_RESUME_TARGET && target_shape == 0;
+                    prop_assert_eq!(
+                        record.actions,
+                        usize::from(acts),
+                        "{:?} performed {} operation(s)",
+                        record.input,
+                        record.actions
+                    );
+                    expected_actions += usize::from(acts);
+                } else {
+                    // A question, a context refresh, an informational
+                    // command, an unknown command and a blank line change
+                    // nothing at all (14.5, 27.1, 27.2, 27.10).
+                    prop_assert_eq!(
+                        record.resume_attempts,
+                        0,
+                        "{:?} attempted a Resume_Action",
+                        record.input
+                    );
+                    prop_assert_eq!(
+                        record.actions,
+                        0,
+                        "{:?} performed {} workspace operation(s)",
+                        record.input,
+                        record.actions
+                    );
+                }
+            }
+
+            // Attempts equal entered resume commands, exactly.
+            let entered_resumes = run.turns.iter().filter(|t| t.class == "act").count();
+            prop_assert_eq!(
+                run.turns.iter().map(|t| t.resume_attempts).sum::<usize>(),
+                entered_resumes
+            );
+
+            // 27.3: wording never becomes behaviour. A question that *asks*
+            // for a resume is answered and nothing else.
+            for (record, _) in run
+                .turns
+                .iter()
+                .zip(kinds.iter())
+                .filter(|(_, k)| **k == KIND_RESUME_WORDING)
+            {
+                prop_assert_eq!(record.class, "question");
+                prop_assert_eq!(record.resume_attempts, 0);
+                prop_assert_eq!(record.actions, 0);
+                prop_assert_eq!(record.harness_calls, 1);
+            }
+
+            // The totals, from the platform's own recording.
+            prop_assert_eq!(plat.actions(), expected_actions);
+            prop_assert_eq!(plat.focused.borrow().len(), expected_actions);
+            prop_assert!(
+                plat.launched.borrow().is_empty(),
+                "no chat input opens a terminal on this workspace"
+            );
+            // 26.20: nothing this loop launches ever carries a command, so no
+            // agent can start inside one.
+            prop_assert!(plat.launched.borrow().iter().all(|l| l.command.is_empty()));
+            // The only child process any of this creates is the one harness
+            // run per question — there is no other spawn on the path, and the
+            // `Platform` trait exposes no process-signal capability at all.
+            let questions = run.turns.iter().filter(|t| t.class == "question").count();
+            prop_assert_eq!(sandbox.invocations(), questions);
+        }
+    }
+
+    proptest! {
+        // 256 cases: three independently generated inputs per case (a pooled
+        // representative, a free-form line and a `/`-prefixed word) against a
+        // pure classifier.
+        #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 14.7, 14.8, 26.1, 27.5, 27.8**
+        // Feature: pitwall-chat-and-brief-ticker, Property 19: Input classification is total and the vocabulary is closed — For any input line, classification yields exactly one of informational command, resume command, end command, unknown command or Chat_Question; every input not beginning with `/` is a Chat_Question; every `/`-prefixed input outside the closed vocabulary yields the vocabulary listing and no harness invocation; and the listing marks each entry as read-only or as changing workspace state, matching its class.
+        #[test]
+        fn prop19_input_classification_is_total_and_the_vocabulary_is_closed(
+            kind in 0usize..INPUT_KINDS,
+            marker in word(),
+            target in session_id(),
+            junk in proptest::string::string_regex("[a-zA-Z0-9 /_.:;|&$`'\"?-]{0,24}")
+                .expect("static regex"),
+            slash_word in proptest::string::string_regex("[a-zA-Z][a-zA-Z0-9-]{0,10}")
+                .expect("static regex"),
+            leading_spaces in 0usize..3,
+        ) {
+            let pooled = input_line(kind, &marker, &target);
+            let free = format!("{}{}", " ".repeat(leading_spaces), junk);
+            let slashed = format!("/{slash_word}");
+            let listing = render_vocabulary();
+
+            for line in [pooled.as_str(), free.as_str(), slashed.as_str()] {
+                let input = classify(line);
+
+                // ---- total: exactly one class, and exactly one spec class --
+                let class = class_name(&input);
+                prop_assert_eq!(CLASSES.iter().filter(|c| **c == class).count(), 1);
+                prop_assert_eq!(
+                    SPEC_CLASSES
+                        .iter()
+                        .filter(|c| **c == spec_class(&input))
+                        .count(),
+                    1
+                );
+                // Acting is a property of the variant, not of a flag (14.10).
+                prop_assert_eq!(input.changes_workspace_state(), class == "act");
+                prop_assert_eq!(input.invokes_harness(), class == "question");
+
+                // ---- the vocabulary is closed, and the listing agrees ----
+                let named = input.vocabulary_entry().is_some();
+                prop_assert_eq!(named, matches!(class, "info" | "act" | "end"));
+                prop_assert_eq!(input.effect().is_some(), named);
+                if let Some(entry) = input.vocabulary_entry() {
+                    let effect = input.effect().expect("a named entry has an effect");
+                    prop_assert_eq!(entry.effect, effect);
+                    prop_assert_eq!(effect.changes_workspace_state(), class == "act");
+                    // 27.8: the entry's own line carries its own mark, and
+                    // not the other one.
+                    let listed = listing
+                        .lines()
+                        .find(|l| l.trim_start().starts_with(entry.name))
+                        .expect("every entry is listed");
+                    prop_assert!(listed.contains(effect.marker()), "{listed}");
+                    let other = if effect.changes_workspace_state() {
+                        Effect::ReadOnly
+                    } else {
+                        Effect::ChangesWorkspaceState
+                    };
+                    prop_assert!(!listed.contains(other.marker()), "{listed}");
+                    prop_assert!(listed.contains(entry.help), "{listed}");
+                }
+
+                // ---- not `/`-prefixed ⇒ never a command (27.5) ----
+                if !line.trim().starts_with('/') {
+                    prop_assert!(
+                        matches!(class, "blank" | "question" | "too-long"),
+                        "{:?} became {}",
+                        line,
+                        class
+                    );
+                }
+
+                // ---- `/`-prefixed outside the vocabulary ⇒ the listing, and
+                // nothing invoked (14.8) ----
+                if let ChatInput::Unknown { entered } = &input {
+                    let msg = unknown_command_message(entered);
+                    prop_assert!(msg.contains("nothing was run"), "{msg}");
+                    prop_assert!(msg.ends_with(listing.as_str()), "{msg}");
+                    for vocab in VOCABULARY {
+                        prop_assert!(msg.contains(vocab.name), "{msg}");
+                        prop_assert!(msg.contains(vocab.effect.marker()), "{msg}");
+                    }
+                    prop_assert!(!input.invokes_harness());
+                    prop_assert!(!input.changes_workspace_state());
+                }
+            }
+
+            // A bare `/`-prefixed word is an unknown command exactly when it
+            // is not a vocabulary entry — every entry accepts zero arguments,
+            // so the equivalence is total for this shape.
+            let in_vocabulary = VOCABULARY.iter().any(|e| e.name == slashed.as_str());
+            prop_assert_eq!(
+                matches!(classify(&slashed), ChatInput::Unknown { .. }),
+                !in_vocabulary
+            );
+
+            // Exactly one entry may change workspace state, and it is the
+            // resume command (26.1).
+            let acting: Vec<&str> = VOCABULARY
+                .iter()
+                .filter(|e| e.effect.changes_workspace_state())
+                .map(|e| e.name)
+                .collect();
+            prop_assert_eq!(acting, vec!["/resume"]);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Task 9.6 — Properties 13, 20, 21, 26 and 27
+    // -----------------------------------------------------------------
+
+    use std::collections::HashMap;
+
+    /// One synthetic observed session. Direct construction rather than
+    /// `collect`, because these properties need to *choose* the session set,
+    /// the projects and the recorded confidences.
+    fn synth_session(
+        index: usize,
+        project_ix: usize,
+        confidence: crate::collector::Confidence,
+    ) -> crate::collector::TerminalSession {
+        let pid = 100 + index as u32;
+        crate::collector::TerminalSession {
+            id: format!("sess_{index:016x}"),
+            window: Some(window(
+                &format!("0x{}", index + 1),
+                "foot",
+                "user@host:~",
+                pid,
+            )),
+            root_pid: pid,
+            role: crate::collector::WindowRole::Terminal,
+            project: Some(crate::collector::ProjectInfo {
+                id: format!("proj_{project_ix:016x}"),
+                dir: format!("/home/u/P{project_ix}"),
+                name: format!("P{project_ix}"),
+                is_git_repo: false,
+                branch: None,
+                git_clean: None,
+            }),
+            agent: crate::collector::AgentIdentity {
+                kind: crate::collector::AgentKind::Unknown,
+                confidence,
+                evidence: Vec::new(),
+            },
+            chat: None,
+            state: crate::collector::SessionState::Sleeping,
+            process_count: 1,
+            processes: Vec::new(),
+            last_activity_epoch: 1_700_000_000 + index as i64,
+            last_activity_kind: crate::collector::LAST_ACTIVITY_KIND,
+            summary: format!("session {index}"),
+        }
+    }
+
+    fn synth_snapshot(
+        sessions: Vec<crate::collector::TerminalSession>,
+    ) -> crate::collector::WorkspaceSnapshot {
+        crate::collector::WorkspaceSnapshot {
+            schema_version: crate::collector::SNAPSHOT_SCHEMA_VERSION,
+            collected_at_epoch: 1_700_000_100,
+            hostname: "testbox".to_string(),
+            sessions,
+        }
+    }
+
+    fn synth_checkpoint(
+        id: i64,
+        session_id: &str,
+        project_id: &str,
+        project_dir: &str,
+    ) -> crate::store::Checkpoint {
+        crate::store::Checkpoint {
+            id,
+            created_at: 1_700_000_000 + id,
+            project_id: project_id.to_string(),
+            session_id: session_id.to_string(),
+            project_dir: project_dir.to_string(),
+            branch: None,
+            git_clean: None,
+            agent_kind: "unknown".to_string(),
+            agent_confidence: "low".to_string(),
+            state: "sleeping".to_string(),
+            last_activity_epoch: 1_700_000_050,
+            window_address: None,
+            window_class: None,
+            note: None,
+            trigger: "manual".to_string(),
+            observation_id: None,
+        }
+    }
+
+    fn synth_notification(id: i64, session_id: &str, project_id: &str) -> crate::store::Notification {
+        crate::store::Notification {
+            id,
+            kind: "attention".to_string(),
+            session_id: session_id.to_string(),
+            project_id: project_id.to_string(),
+            project_name: "P0".to_string(),
+            branch: None,
+            agent_kind: "unknown".to_string(),
+            state: "sleeping".to_string(),
+            checkpoint_id: None,
+            created_at: 1_700_000_000 + id,
+            severity: "info".to_string(),
+            detail: "idle".to_string(),
+            read_at: None,
+        }
+    }
+
+    fn synth_prev(session_id: &str, project_id: &str, project_dir: &str) -> crate::store::PrevSession {
+        crate::store::PrevSession {
+            session_id: session_id.to_string(),
+            project_id: Some(project_id.to_string()),
+            project_dir: Some(project_dir.to_string()),
+            agent_kind: "unknown".to_string(),
+            branch: None,
+            git_clean: None,
+            state: "sleeping".to_string(),
+        }
+    }
+
+    /// The session blocks of a bounded context document, in order.
+    ///
+    /// Exact rather than approximate: `render_document` opens each block with
+    /// `"  {\n"`, and no field value can contain that run because every value
+    /// goes through `output::escape`, which turns a newline into `\n`.
+    fn document_session_blocks(document: &str) -> Vec<&str> {
+        let region = document
+            .split("\n],\"events\":[")
+            .next()
+            .unwrap_or_default();
+        region.split("  {\n").skip(1).collect()
+    }
+
+    /// The value of a JSON string field in a session block.
+    fn json_string_of(block: &str, field: &str) -> Option<String> {
+        let needle = format!("\"{field}\": \"");
+        let start = block.find(&needle)? + needle.len();
+        let rest = &block[start..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    }
+
+    /// Element count of a JSON array field in a session block. The generated
+    /// terminal lines carry no comma, so counting separators is exact.
+    fn json_array_len(block: &str, field: &str) -> Option<usize> {
+        let needle = format!("\"{field}\": [");
+        let start = block.find(&needle)? + needle.len();
+        let rest = &block[start..];
+        let end = rest.find(']')?;
+        let body = &rest[..end];
+        if body.trim().is_empty() {
+            return Some(0);
+        }
+        Some(body.matches(',').count() + 1)
+    }
+
+    /// Lines of a `stable_serialized()` context that open with `prefix`.
+    fn stable_lines(stable: &str, prefix: &str) -> usize {
+        stable.lines().filter(|l| l.starts_with(prefix)).count()
+    }
+
+    proptest! {
+        // 128 cases: 1..8 sessions over 3 projects × 4 recorded confidences ×
+        // 0..26 terminal lines × 0..14 checkpoints × 0..25 notifications ×
+        // 0..30 vanished sessions × 3 scope shapes.
+        #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 12.2, 12.3, 12.4, 13.4, 15.3, 21.4**
+        // Feature: pitwall-chat-and-brief-ticker, Property 13: Chat context stays inside the existing bounds and scope — For any observed workspace, the context a Chat_Session builds contains at most 6 sessions, 20 derived events, 10 checkpoints and 16 KB of document, carries each kept session's recorded agent confidence, carries at most the bounded first/last terminal-line window, reports any omission honestly, and includes the descriptor's context session and its project whenever that session is observed.
+        #[test]
+        fn prop13_chat_context_stays_inside_the_existing_bounds_and_scope(
+            facts in proptest::collection::vec((0usize..3, 0usize..4), 1..8),
+            scroll_lines in 0usize..26,
+            checkpoint_count in 0usize..14,
+            notification_count in 0usize..25,
+            vanished in 0usize..30,
+            scope_choice in 0usize..3,
+            scope_pick in 0usize..8,
+        ) {
+            let sandbox = Sandbox::new("p13");
+            const CONFIDENCES: &[crate::collector::Confidence] = &[
+                crate::collector::Confidence::High,
+                crate::collector::Confidence::Medium,
+                crate::collector::Confidence::Low,
+                crate::collector::Confidence::Unknown,
+            ];
+            let sessions: Vec<crate::collector::TerminalSession> = facts
+                .iter()
+                .enumerate()
+                .map(|(i, (project_ix, conf_ix))| synth_session(i, *project_ix, CONFIDENCES[*conf_ix]))
+                .collect();
+            let snapshot = synth_snapshot(sessions.clone());
+
+            // Bounded terminal text, produced by the *same* function the
+            // platform uses at the observation boundary
+            // (`context::window_lines`), so "at most the bounded first/last
+            // window" is checked against the bound itself.
+            let lines: Vec<String> = (0..scroll_lines).map(|i| format!("line-{i}")).collect();
+            let (want_first, want_last) = crate::context::window_lines(&lines);
+            let plat = RecordingPlatform {
+                windows: (0..sessions.len())
+                    .map(|i| window(&format!("0x{}", i + 1), "foot", "user@host:~", 100 + i as u32))
+                    .collect(),
+                text: TerminalText::Lines {
+                    first: want_first,
+                    last: want_last,
+                },
+                io: Some(IoCounters {
+                    read_bytes: 1024,
+                    write_bytes: 2048,
+                }),
+                ..RecordingPlatform::quiet()
+            };
+
+            // Store rows: some belonging to the scoped project, some not.
+            let checkpoints: Vec<crate::store::Checkpoint> = (0..checkpoint_count)
+                .map(|i| {
+                    let owner = i % sessions.len();
+                    synth_checkpoint(
+                        i as i64 + 1,
+                        &format!("sess_{owner:016x}"),
+                        &format!("proj_{:016x}", facts[owner].0),
+                        &format!("/home/u/P{}", facts[owner].0),
+                    )
+                })
+                .collect();
+            let notifications: Vec<crate::store::Notification> = (0..notification_count)
+                .map(|i| {
+                    let owner = i % sessions.len();
+                    synth_notification(
+                        i as i64 + 1,
+                        &format!("sess_{owner:016x}"),
+                        &format!("proj_{:016x}", facts[owner].0),
+                    )
+                })
+                .collect();
+            // Previous-observation rows for sessions that are gone: each is
+            // one derived event, which is how the 20-event cap is made to
+            // bite rather than assumed.
+            let prev: Vec<crate::store::PrevSession> = (0..vanished)
+                .map(|i| {
+                    synth_prev(
+                        &format!("sess_{:016x}", 1000 + i),
+                        &format!("proj_{:016x}", i % 3),
+                        &format!("/home/u/P{}", i % 3),
+                    )
+                })
+                .collect();
+
+            // The scope: no context session, an observed one, or one that
+            // ended since the chat started.
+            let observed_ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+            let scoped_id: Option<String> = match scope_choice {
+                0 => None,
+                1 => Some(observed_ids[scope_pick % observed_ids.len()].clone()),
+                _ => Some("sess_ffffffffffffffff".to_string()),
+            };
+            let scoped_project: Option<String> = scoped_id.as_ref().and_then(|id| {
+                sessions
+                    .iter()
+                    .find(|s| &s.id == id)
+                    .and_then(|s| s.project.as_ref().map(|p| p.id.clone()))
+            });
+
+            // The unscoped event derivation, as an oracle for the cap.
+            let uncapped_events = crate::context::derive_events(
+                &prev,
+                &snapshot,
+                &[],
+                usize::MAX,
+            )
+            .len();
+
+            let scope = scope_to_context(
+                scoped_id.as_deref(),
+                snapshot.clone(),
+                prev.clone(),
+                Vec::new(),
+                checkpoints.clone(),
+                notifications.clone(),
+            );
+            let scope_ids: Vec<String> =
+                scope.snapshot().sessions.iter().map(|s| s.id.clone()).collect();
+            let scoped_checkpoints = scope.checkpoints().len();
+            let scoped_notifications = scope.notifications().len();
+            let scoped_prev = scope.prev_sessions().len();
+
+            // ---- scope (12.3, 12.4, 21.4) ----
+            match &scoped_id {
+                // The whole observed workspace, unfiltered.
+                None => prop_assert_eq!(scope_ids.clone(), observed_ids.clone()),
+                Some(id) if observed_ids.contains(id) => {
+                    // That session and its project: every session sharing the
+                    // project id, and nothing else.
+                    let want: Vec<String> = sessions
+                        .iter()
+                        .filter(|s| {
+                            &s.id == id
+                                || s.project.as_ref().map(|p| &p.id) == scoped_project.as_ref()
+                        })
+                        .map(|s| s.id.clone())
+                        .collect();
+                    prop_assert_eq!(scope_ids.clone(), want);
+                    prop_assert!(scope_ids.contains(id));
+                }
+                // The scope's subject ended: no live session is in scope, and
+                // the context does not widen back to the whole workspace.
+                Some(_) => prop_assert!(scope_ids.is_empty()),
+            }
+
+            let context = scope.into_summary_context();
+            let stable = context.stable_serialized();
+            let events = stable_lines(&stable, "event=");
+
+            // ---- the caps `cmd_summarize` applies (12.2) ----
+            prop_assert!(events <= MAX_CHAT_EVENTS, "{} events", events);
+            if scoped_id.is_none() {
+                prop_assert_eq!(events, uncapped_events.min(MAX_CHAT_EVENTS));
+            }
+            prop_assert_eq!(
+                stable_lines(&stable, "checkpoint="),
+                scoped_checkpoints.min(MAX_CHAT_CHECKPOINTS)
+            );
+            prop_assert!(stable_lines(&stable, "checkpoint=") <= MAX_CHAT_CHECKPOINTS);
+            prop_assert_eq!(
+                stable_lines(&stable, "notification="),
+                scoped_notifications.min(MAX_CHAT_NOTIFICATIONS)
+            );
+            prop_assert!(scoped_prev <= prev.len());
+
+            let (document, truncated) =
+                crate::context::build_context_from_summary(&plat, &context);
+
+            // ---- 16 KB, 6 sessions, and an honest omission count ----
+            prop_assert!(
+                document.len() <= crate::context::MAX_CONTEXT_BYTES,
+                "{} bytes",
+                document.len()
+            );
+            let blocks = document_session_blocks(&document);
+            prop_assert!(blocks.len() <= crate::context::MAX_SESSIONS);
+            prop_assert_eq!(blocks.len(), scope_ids.len().min(crate::context::MAX_SESSIONS));
+            prop_assert_eq!(truncated, scope_ids.len() - blocks.len());
+            prop_assert_eq!(truncated > 0, scope_ids.len() > blocks.len());
+            prop_assert!(document.contains(&format!("\"truncated_sessions\":{truncated}")));
+
+            for block in &blocks {
+                let id = json_string_of(block, "id").expect("every block names its session");
+                prop_assert!(scope_ids.contains(&id), "{} is out of scope", id);
+                // ---- each kept session's *recorded* confidence (13.4) ----
+                let want = sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.agent.confidence.as_str())
+                    .expect("a kept session is an observed session");
+                let recorded = json_string_of(block, "agent_confidence");
+                prop_assert_eq!(recorded.as_deref(), Some(want));
+                // ---- at most the bounded first/last terminal window (15.3) --
+                match crate::context::window_lines(&lines) {
+                    (first, last) if lines.is_empty() => {
+                        prop_assert!(first.is_empty() && last.is_empty());
+                        prop_assert_eq!(json_array_len(block, "term_first"), Some(0));
+                        prop_assert_eq!(json_array_len(block, "term_last"), Some(0));
+                    }
+                    (first, last) => {
+                        prop_assert_eq!(json_array_len(block, "term_first"), Some(first.len()));
+                        prop_assert_eq!(json_array_len(block, "term_last"), Some(last.len()));
+                        prop_assert!(first.len() <= crate::context::WINDOW_LINES);
+                        prop_assert!(last.len() <= crate::context::WINDOW_LINES);
+                    }
+                }
+            }
+
+            // ---- the descriptor's context session appears when it is
+            // observed and the scoped set fits the bound ----
+            if let Some(id) = &scoped_id {
+                if observed_ids.contains(id) && scope_ids.len() <= crate::context::MAX_SESSIONS {
+                    prop_assert!(
+                        document.contains(id.as_str()),
+                        "the context session must be in the document"
+                    );
+                    if let Some(project) = &scoped_project {
+                        let name = sessions
+                            .iter()
+                            .find(|s| &s.id == id)
+                            .and_then(|s| s.project.as_ref().map(|p| p.name.clone()))
+                            .expect("the scoped session has a project");
+                        prop_assert!(document.contains(&name), "its project must be named");
+                        prop_assert!(!project.is_empty());
+                    }
+                }
+            }
+
+            // ---- and the production observing path holds the same bounds ---
+            // `observe` performs the collect and the degradable store reads;
+            // the sandbox holds no database, so those reads yield nothing and
+            // none is created (15.6).
+            let d = descriptor_in(&sandbox, 2, "opencode", "", WORKSPACE_LABEL, None);
+            let live = observe(&plat, &d, &sandbox.data_dir);
+            prop_assert!(live.document().len() <= crate::context::MAX_CONTEXT_BYTES);
+            let live_blocks = document_session_blocks(live.document()).len();
+            prop_assert!(live_blocks <= crate::context::MAX_SESSIONS);
+            prop_assert_eq!(
+                live.truncated_sessions(),
+                plat.windows.len().saturating_sub(live_blocks)
+            );
+            prop_assert!(!sandbox.db().exists(), "chat opens no database that is absent");
+        }
+    }
+
+    proptest! {
+        // 128 cases over generated secret-shaped, environment-shaped,
+        // command-line-shaped, address-shaped and scrollback-shaped values.
+        #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 15.1, 15.2, 15.5, 22.7, 26.25**
+        // Feature: pitwall-chat-and-brief-ticker, Property 20: Excluded value classes never appear in presented or transmitted values — For any observed workspace and any conversation, no environment value, credential, token, private key, raw process command line, process identifier, window address, shell history line or unbounded scrollback appears in the Chat_Session's presented lines, in the document transmitted to the harness, or in the chat fields of `state.json`; question and answer text are both scrubbed by the existing secret-scrubbing function.
+        #[test]
+        fn prop20_excluded_value_classes_never_appear_in_presented_or_transmitted_values(
+            marker in word(),
+            harness_ix in 0usize..crate::agents::KNOWN.len(),
+            model_ix in 0usize..MODEL_IDS.len(),
+            label_ix in 0usize..CONTEXT_LABELS.len(),
+            number in 1u16..=999u16,
+            secret_shape in 0usize..3,
+            context in proptest::option::of(session_id()),
+        ) {
+            let sandbox = Sandbox::new("p20");
+            // **Every secret-shaped value is assembled at runtime**, so the
+            // repository carries no credential-shaped literal and the CI
+            // secret scan stays clean — the same technique `context.rs`'s
+            // tests use.
+            let token = ["ghp", "0123456789abcdefghij"].join("_");
+            let key_value = format!("AbCd1234{}", marker.to_uppercase());
+            let key_form = format!("{}={}", "token", key_value);
+            let pem = format!(
+                "{}{}{}",
+                "-----BEGIN ", "RSA PRIVATE KEY-----\nMIIabc", "def\n-----END RSA PRIVATE KEY-----\n"
+            );
+            let (secret, must_vanish) = match secret_shape {
+                0 => (token.clone(), token.clone()),
+                1 => (key_form.clone(), key_value.clone()),
+                _ => (pem.clone(), "MIIabc".to_string()),
+            };
+            // The other excluded classes, each with a unique marker so its
+            // absence is a substring search rather than an argument.
+            let env_value = format!("PITWALL_TEST_ENV=env-{marker}");
+            let command_line = format!("/usr/bin/opencode --auto {env_value}");
+            let window_address = format!("0xdead{marker}");
+            let pid = 987_654u32;
+            let history_line = format!("history-{marker} export {key_form}");
+
+            // 40 scrollback lines: the middle ones (including the shell
+            // history line) are outside the bounded window, and a kept one
+            // carries a secret so the scrubber is exercised on the way out.
+            let scrollback: Vec<String> = (0..40)
+                .map(|i| match i {
+                    2 => format!("kept-{marker}-{i} {key_form}"),
+                    15 => history_line.clone(),
+                    i if (10..30).contains(&i) => format!("middle-{marker}-{i}"),
+                    i => format!("kept-{marker}-{i}"),
+                })
+                .collect();
+            let (first, last) = crate::context::window_lines(&scrollback);
+
+            // The observed workspace: one chat window carrying the address,
+            // the pid and the raw command line.
+            let harness = crate::agents::KNOWN[harness_ix].id;
+            let model = MODEL_IDS[model_ix];
+            let label = CONTEXT_LABELS[label_ix];
+            let mut session = synth_session(0, 0, crate::collector::Confidence::Low);
+            session.window = Some(window(
+                &window_address,
+                "foot",
+                &format!(
+                    "{CHAT_LABEL} {number:03} \u{00b7} {harness} \u{00b7} {} \u{00b7} {label}",
+                    if model.is_empty() { AGENT_DEFAULT_LABEL } else { model }
+                ),
+                pid,
+            ));
+            session.root_pid = pid;
+            session.role = crate::collector::WindowRole::Chat;
+            session.processes = vec![crate::collector::ProcessInfo {
+                pid,
+                ppid: 1,
+                name: "opencode".to_string(),
+                command: command_line.clone(),
+                exe_name: "opencode".to_string(),
+                cwd: "/home/u/P0".to_string(),
+                state: crate::collector::ProcessState::Sleeping,
+                started_at_epoch: 1_700_000_050,
+            }];
+            session.chat = Some(crate::collector::ChatFacts {
+                number,
+                harness: harness.to_string(),
+                model: model.to_string(),
+                context_label: label.to_string(),
+                context_session_id: context.clone(),
+                started_at_epoch: 1_700_000_100,
+            });
+            let snapshot = synth_snapshot(vec![session]);
+            let plat = RecordingPlatform {
+                windows: vec![window(&window_address, "foot", "user@host:~", pid)],
+                text: TerminalText::Lines { first, last },
+                io: Some(IoCounters {
+                    read_bytes: 1024,
+                    write_bytes: 2048,
+                }),
+                ..RecordingPlatform::quiet()
+            };
+
+            // ---- the document transmitted to the harness ----
+            let scope = scope_to_context(
+                None,
+                snapshot.clone(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            let (document, _) =
+                crate::context::build_context_from_summary(&plat, &scope.into_summary_context());
+            for excluded in [
+                must_vanish.as_str(),
+                env_value.as_str(),
+                command_line.as_str(),
+                window_address.as_str(),
+                "987654",
+                history_line.as_str(),
+            ] {
+                prop_assert!(
+                    !document.contains(excluded),
+                    "excluded value {:?} reached the transmitted document",
+                    excluded
+                );
+            }
+            // Unbounded scrollback: the middle of the buffer is not there.
+            for i in 10..30 {
+                prop_assert!(!document.contains(&format!("middle-{marker}-{i}")));
+            }
+            // A secret inside an otherwise-safe field is redacted, not dropped
+            // silently: the line is still there, its secret is not.
+            prop_assert!(document.contains(&format!("kept-{marker}-2")));
+            prop_assert!(document.contains("[redacted]"), "{document}");
+
+            // ---- the chat fields of state.json (22.7) ----
+            let state = crate::output::snapshot_to_state_json(
+                &snapshot,
+                &[],
+                None,
+                &HashMap::new(),
+                &crate::output::ConfigEcho::default(),
+                &[],
+                0,
+            );
+            let chat_object = extract_chat_object(&state).expect("a chat session emits chat fields");
+            for key in [
+                "number",
+                "harness",
+                "model",
+                "context_label",
+                "context_session_id",
+                "started_at",
+            ] {
+                prop_assert!(chat_object.contains(&format!("\"{key}\":")), "{chat_object}");
+            }
+            for excluded in [
+                must_vanish.as_str(),
+                env_value.as_str(),
+                command_line.as_str(),
+                window_address.as_str(),
+                "987654",
+                history_line.as_str(),
+            ] {
+                prop_assert!(
+                    !chat_object.contains(excluded),
+                    "excluded value {:?} reached the chat fields",
+                    excluded
+                );
+            }
+
+            // ---- the presented lines ----
+            // Question and answer both go through the existing scrubber
+            // (15.5), in the same order, on both sides of the conversation.
+            let asked = format!("does {secret} still work, {marker}?");
+            let question = question_of(&asked);
+            prop_assert!(
+                !question.text().contains(must_vanish.as_str()),
+                "{}",
+                question.text()
+            );
+            prop_assert!(question.text().contains("redacted"), "{}", question.text());
+            let answered = present_answer(&format!("state ok \u{1b}]2;steal\u{7} {secret}"));
+            prop_assert!(!answered.contains(must_vanish.as_str()), "{answered}");
+            prop_assert!(answered.contains("redacted"), "{answered}");
+            prop_assert!(!answered.contains('\u{1b}'), "{answered}");
+
+            let mut conversation = Conversation::new();
+            conversation.record(Role::You, 1_700_000_200, question.text());
+            conversation.record(Role::Pitwall, 1_700_000_201, &answered);
+            let d = descriptor_in(&sandbox, number, harness, model, label, context.as_deref());
+            let mut presented = render_header(&d, Palette::plain());
+            for turn in conversation.turns() {
+                presented.push_str(&render_turn(turn, Palette::plain()));
+            }
+            // A resume line is a presented line too, and the executor focuses
+            // by address — which must not surface (15.2, 26.25).
+            let live = crate::collector::collect(&plat)
+                .sessions
+                .first()
+                .map(|s| s.id.clone())
+                .expect("one observed window is one session");
+            let report = resume_action(&plat, &sandbox.db(), &d, Some(&live));
+            prop_assert!(report.is_ok(), "{:?}", report);
+            prop_assert_eq!(plat.focused.borrow().len(), 1);
+            {
+                let focused = plat.focused.borrow();
+                prop_assert_eq!(focused[0].as_str(), window_address.as_str());
+            }
+            presented.push_str(&resume_line(&report));
+
+            for excluded in [
+                must_vanish.as_str(),
+                env_value.as_str(),
+                command_line.as_str(),
+                window_address.as_str(),
+                "987654",
+                history_line.as_str(),
+            ] {
+                prop_assert!(
+                    !presented.contains(excluded),
+                    "excluded value {:?} reached a presented line",
+                    excluded
+                );
+            }
+            prop_assert!(!presented.contains(&format!("middle-{marker}-15")));
+        }
+    }
+
+    /// The `chat` object of a state artifact. The object carries only strings
+    /// and numbers, so the first `}` closes it.
+    fn extract_chat_object(state: &str) -> Option<&str> {
+        let start = state.find("\"chat\":{")?;
+        let rest = &state[start..];
+        let end = rest.find('}')?;
+        Some(&rest[..=end])
+    }
+
+    proptest! {
+        // 100 cases (the floor): each opens a real SQLite store, drives 1..4
+        // questions through the loop and then searches the database bytes.
+        #![proptest_config(ProptestConfig { cases: 100, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 15.6, 19.4, 19.5, 19.6**
+        // Feature: pitwall-chat-and-brief-ticker, Property 21: Conversations are never persisted — For any conversation, after the Chat_Session ends no question or answer substring exists in the SQLite database, in `state.json`, in the repository or in any log, the checkpoint count is unchanged, and no resumable entry names the Chat_Session.
+        #[test]
+        fn prop21_conversations_are_never_persisted(
+            marker in word(),
+            exchanges in 1usize..4,
+            seed_checkpoints in 0usize..4,
+            number in 1u16..=999u16,
+        ) {
+            // **The honest form chosen here.** Chat writes nothing, so the
+            // property is stated as a search rather than as a diff of
+            // intentions: run a real conversation against a real temp SQLite
+            // store, then assert that no question or answer substring exists
+            // in the database file's bytes, in any file under the data or
+            // runtime directories, or in the rendered state artifact — and
+            // that the checkpoint count is the number that was there before.
+            // "In the repository" is covered structurally: every path this
+            // run can write to is inside the sandbox, and the two it writes
+            // at all (the runtime directory and the store) are searched. The
+            // fake harness directory is excluded from the search for the
+            // obvious reason that a stand-in agent naturally holds its own
+            // answer text; a real installed agent is not a Pitwall artifact.
+            let question_marker = format!("q{marker}");
+            let answer_text = format!("a{marker}");
+            let sandbox = Sandbox::with_harness("p21", &answer_text);
+
+            std::fs::create_dir_all(&sandbox.data_dir).expect("data dir");
+            let mut store = crate::store::Store::open(&sandbox.db()).expect("temp store");
+            for i in 0..seed_checkpoints {
+                store
+                    .insert_checkpoint(
+                        1_700_000_200 + i as i64,
+                        "proj_x",
+                        &format!("sess_{i:016x}"),
+                        &sandbox.project_dir(),
+                        Some("main"),
+                        Some(true),
+                        "opencode",
+                        "high",
+                        "sleeping",
+                        1_700_000_100,
+                        Some("0x1"),
+                        Some("foot"),
+                        None,
+                        crate::store::trigger::DISAPPEARANCE,
+                        None,
+                    )
+                    .expect("seed checkpoint");
+            }
+            let checkpoints_before = store.checkpoint_count().expect("count");
+            drop(store);
+
+            let plat = RecordingPlatform::quiet();
+            let d = descriptor_in(&sandbox, number, "opencode", "", WORKSPACE_LABEL, None);
+            let lines: Vec<String> = (0..exchanges)
+                .map(|i| format!("what is {question_marker}-{i} doing?"))
+                .collect();
+            let run = drive(&plat, &d, &sandbox, &lines);
+
+            // The conversation happened: both sides are held, in memory.
+            prop_assert_eq!(run.turns.len(), exchanges);
+            prop_assert_eq!(run.conversation.len(), exchanges * 2);
+            prop_assert_eq!(sandbox.invocations(), exchanges);
+            prop_assert!(run
+                .conversation
+                .turns()
+                .iter()
+                .any(|t| t.text().contains(question_marker.as_str())));
+            prop_assert!(run
+                .conversation
+                .turns()
+                .iter()
+                .any(|t| t.text() == answer_text.as_str()));
+
+            // ---- nothing of it reached the database ----
+            let db_bytes = std::fs::read(sandbox.db()).expect("store file");
+            prop_assert!(!db_bytes.is_empty(), "the store file is really there");
+            prop_assert!(!bytes_contain(&db_bytes, question_marker.as_str()));
+            prop_assert!(!bytes_contain(&db_bytes, answer_text.as_str()));
+
+            // ---- nor any other file the run could have written ----
+            let mut searched = 0usize;
+            for file in files_under(&sandbox.data_dir)
+                .into_iter()
+                .chain(files_under(&sandbox.runtime_dir))
+            {
+                let bytes = std::fs::read(&file).unwrap_or_default();
+                prop_assert!(
+                    !bytes_contain(&bytes, question_marker.as_str()),
+                    "a question reached {:?}",
+                    file
+                );
+                prop_assert!(
+                    !bytes_contain(&bytes, answer_text.as_str()),
+                    "an answer reached {:?}",
+                    file
+                );
+                searched += 1;
+            }
+            prop_assert!(searched >= 1, "the store file is at least searched");
+            // 12.8, 15.7: no ephemeral context outlived the run either.
+            prop_assert!(sandbox.staged().is_empty(), "{:?}", sandbox.staged());
+
+            // ---- the checkpoint count is unchanged, and no resumable entry
+            // names the chat (19.6) ----
+            let store = crate::store::Store::open(&sandbox.db()).expect("reopen");
+            prop_assert_eq!(store.checkpoint_count().expect("count"), checkpoints_before);
+            let resumable = store.latest_checkpoints(100).expect("resumable");
+            prop_assert_eq!(resumable.len(), seed_checkpoints);
+            let number_text = d.number_text();
+            for cp in &resumable {
+                prop_assert_ne!(cp.session_id.as_str(), number_text.as_str());
+                prop_assert!(!cp.session_id.contains(question_marker.as_str()));
+                prop_assert!(cp.note.is_none());
+            }
+            drop(store);
+
+            // ---- nor the state artifact ----
+            let state = crate::output::snapshot_to_state_json(
+                &crate::collector::collect(&plat),
+                &resumable,
+                None,
+                &HashMap::new(),
+                &crate::output::ConfigEcho::default(),
+                &[],
+                0,
+            );
+            prop_assert!(!state.contains(question_marker.as_str()), "{state}");
+            prop_assert!(!state.contains(answer_text.as_str()), "{state}");
+
+            // ---- and ending the chat discards it (19.5) ----
+            let mut conversation = run.conversation;
+            conversation.clear();
+            prop_assert!(conversation.is_empty());
+            prop_assert_eq!(conversation.len(), 0);
+        }
+    }
+    proptest! {
+        // 140 cases: 7 outcome shapes × 3 bad-directory shapes × 5 malformed
+        // shapes is 105 combinations, so 140 samples every one of them and
+        // most of them more than once. Each case opens a real temp SQLite
+        // store for the executor's Level 2 lookup.
+        #![proptest_config(ProptestConfig { cases: 140, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 26.7, 26.8, 26.9, 26.10, 26.11, 26.12, 26.13, 26.14, 26.15, 26.16, 26.20, 26.21, 26.22, 26.25, 24.18**
+        // Feature: pitwall-chat-and-brief-ticker, Property 26: Resume_Action refusals are complete and side-effect free — For any resume target, the outcome is exactly one of: refusal naming the missing target (no argument and no recorded context session), refusal on shape validation, refusal because the session is neither live nor checkpointed, refusal naming the offending directory (not absolute, missing or not a directory), focus of exactly one live window, or exactly one terminal opened at the checkpoint's directory — and every refusal performs zero executor side effects, zero agent spawns and no directory substitution; success lines name the target and the operation, failure lines carry the executor's reason.
+        #[test]
+        fn prop26_resume_action_refusals_are_complete_and_side_effect_free(
+            case_shape in 0usize..7,
+            bad_dir_shape in 0usize..3,
+            malformed_shape in 0usize..5,
+            target in session_id(),
+            marker in word(),
+        ) {
+            let sandbox = Sandbox::new("p26");
+
+            // The four directory shapes a checkpoint can carry, all inside the
+            // sandbox: one that validates, one that is not absolute, one that
+            // is absent, and one that exists but is a file.
+            let good_dir = sandbox.root.join("project");
+            std::fs::create_dir_all(&good_dir).expect("checkpoint directory");
+            let decoy_dir = sandbox.root.join("decoy");
+            std::fs::create_dir_all(&decoy_dir).expect("decoy directory");
+            let file_dir = sandbox.root.join("a-file");
+            std::fs::write(&file_dir, "not a directory").expect("file standing in for a dir");
+            let missing_dir = sandbox.root.join("gone");
+            let good_text = good_dir.to_string_lossy().into_owned();
+            let decoy_text = decoy_dir.to_string_lossy().into_owned();
+            let file_text = file_dir.to_string_lossy().into_owned();
+            let missing_text = missing_dir.to_string_lossy().into_owned();
+            let relative_text = format!("relative/{marker}");
+
+            // The executor names two of the three bad directories in its
+            // reason, so those reasons must be presentable verbatim for the
+            // "naming the offending directory" half of the property to be
+            // comparing against the reason rather than against a redaction.
+            // That is an assumption about the temp directory this machine
+            // hands out, so it is asserted rather than hoped for.
+            for text in [&good_text, &decoy_text, &file_text, &missing_text] {
+                let scrubbed = crate::context::scrub_string(text);
+                prop_assert_eq!(
+                    scrubbed.as_str(),
+                    text.as_str(),
+                    "the sandbox path must be presentable verbatim"
+                );
+                prop_assert!(!text.chars().any(char::is_control), "{}", text);
+            }
+            prop_assert!(!good_text.contains(decoy_text.as_str()));
+            prop_assert!(!missing_text.contains(good_text.as_str()));
+            prop_assert!(!file_text.contains(good_text.as_str()));
+
+            // A well-shaped id that is deliberately *not* the target: the
+            // first hex digit is flipped, so a collision is impossible rather
+            // than improbable.
+            let decoy = {
+                let hex = &target[5..];
+                let mut flipped = String::from(if hex.starts_with('0') { "1" } else { "0" });
+                flipped.push_str(&hex[1..]);
+                format!("sess_{flipped}")
+            };
+            prop_assert_ne!(decoy.as_str(), target.as_str());
+            prop_assert!(crate::resume::is_session_id(&decoy));
+
+            // One near miss per clause of `resume::is_session_id`: wrong
+            // prefix, one digit short, one digit long, uppercase hex, and a
+            // letter outside `[0-9a-f]`.
+            let malformed = match malformed_shape {
+                0 => format!("not-a-session-{marker}"),
+                1 => "sess_0123456789abcde".to_string(),
+                2 => "sess_0123456789abcdef0".to_string(),
+                3 => "sess_0123456789ABCDEF".to_string(),
+                _ => "sess_0123456789abcdeg".to_string(),
+            };
+            prop_assert!(!crate::resume::is_session_id(&malformed), "{}", malformed);
+
+            // Shape 3 is the only live case, so it is the only one whose
+            // platform observes a window at all.
+            let plat = if case_shape == 3 {
+                RecordingPlatform::with_windows(vec![window("0x1", "foot", "user@host:~", 4100)])
+            } else {
+                RecordingPlatform::quiet()
+            };
+            let live_id: Option<String> = crate::collector::collect(&plat)
+                .sessions
+                .first()
+                .map(|s| s.id.clone());
+            if case_shape == 3 {
+                prop_assert!(live_id.is_some(), "one observed window is one session");
+            }
+
+            // How the target is supplied, and what it resolves to. Shape 1 is
+            // the 26.7 path: nothing is entered, and the descriptor's own
+            // context session id is used.
+            let (argument, descriptor_context, resolved): (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = match case_shape {
+                0 => (None, None, None),
+                1 => (None, Some(target.clone()), Some(target.clone())),
+                2 => (Some(malformed.clone()), None, None),
+                3 => (live_id.clone(), None, live_id.clone()),
+                _ => (Some(target.clone()), None, Some(target.clone())),
+            };
+
+            // The checkpoint the resolved target holds, when it holds one.
+            let checkpoint_dir: Option<String> = match case_shape {
+                1 | 4 => Some(good_text.clone()),
+                5 => Some(match bad_dir_shape {
+                    0 => relative_text.clone(),
+                    1 => missing_text.clone(),
+                    _ => file_text.clone(),
+                }),
+                _ => None,
+            };
+
+            std::fs::create_dir_all(&sandbox.data_dir).expect("data dir");
+            let mut store = crate::store::Store::open(&sandbox.db()).expect("temp store");
+            // The decoy is resumable, valid and absolute — and it is not the
+            // target. Its presence is what makes "no directory substitution" a
+            // real claim rather than a vacuous one: a bridge that fell back to
+            // any resumable checkpoint would open a terminal at `decoy_dir`.
+            store
+                .insert_checkpoint(
+                    1_700_000_300,
+                    "proj_decoy",
+                    &decoy,
+                    &decoy_text,
+                    None,
+                    None,
+                    "opencode",
+                    "high",
+                    "sleeping",
+                    1_700_000_250,
+                    Some("0x9"),
+                    Some("foot"),
+                    None,
+                    crate::store::trigger::MANUAL,
+                    None,
+                )
+                .expect("decoy checkpoint");
+            if let (Some(id), Some(dir)) = (resolved.as_deref(), checkpoint_dir.as_deref()) {
+                store
+                    .insert_checkpoint(
+                        1_700_000_400,
+                        "proj_target",
+                        id,
+                        dir,
+                        None,
+                        None,
+                        "opencode",
+                        "high",
+                        "sleeping",
+                        1_700_000_350,
+                        Some("0x8"),
+                        Some("foot"),
+                        None,
+                        crate::store::trigger::MANUAL,
+                        None,
+                    )
+                    .expect("target checkpoint");
+            }
+            drop(store);
+
+            let d = descriptor_in(
+                &sandbox,
+                4,
+                "opencode",
+                "",
+                WORKSPACE_LABEL,
+                descriptor_context.as_deref(),
+            );
+            prop_assert_eq!(plat.actions(), 0, "nothing has acted before the attempt");
+
+            let report = resume_action(&plat, &sandbox.db(), &d, argument.as_deref());
+            let line = resume_line(&report);
+
+            // ---- exactly one of the six documented outcomes ----
+            const CASES: &[&str] = &[
+                "missing target",
+                "shape validation",
+                "not resumable",
+                "bad directory",
+                "focused one live window",
+                "opened one terminal",
+            ];
+            // The two executor refusals are told apart by *which* reason the
+            // executor gave, which is the same thing the property distinguishes
+            // them by; the expected reason itself is written out below.
+            let observed = match &report {
+                Err(ResumeRefused::NoTarget) => "missing target",
+                Err(ResumeRefused::MalformedTarget { .. }) => "shape validation",
+                Err(ResumeRefused::Executor { reason, .. }) if reason.contains("no checkpoint") => {
+                    "not resumable"
+                }
+                Err(ResumeRefused::Executor { .. }) => "bad directory",
+                Ok(ResumeDone::FocusedLive { .. }) => "focused one live window",
+                Ok(ResumeDone::OpenedTerminal { .. }) => "opened one terminal",
+            };
+            prop_assert_eq!(
+                CASES.iter().filter(|c| **c == observed).count(),
+                1,
+                "{}",
+                observed
+            );
+            // The expected outcome comes from the generation choice, never from
+            // a second reading of the bridge.
+            let want = match case_shape {
+                0 => "missing target",
+                1 | 4 => "opened one terminal",
+                2 => "shape validation",
+                3 => "focused one live window",
+                5 => "bad directory",
+                _ => "not resumable",
+            };
+            prop_assert_eq!(observed, want, "{}", line);
+
+            // ---- one presentable line, whatever happened (26.23, 26.25) ----
+            prop_assert_eq!(line.lines().count(), 1, "{}", line);
+            prop_assert!(line.ends_with(RESUME_READY), "{}", line);
+            prop_assert!(!line.contains('\u{1b}'), "{}", line);
+
+            match &report {
+                Err(refused) => {
+                    // `reached_executor()` is the oracle for the bridge's own
+                    // refusals: `false` means the resolve-and-shape steps
+                    // returned before `resume::resume` was ever called, so
+                    // there is no executor side effect to look for (26.9,
+                    // 26.12). Shapes 0 and 2 are exactly those two.
+                    let bridge_owned = matches!(case_shape, 0 | 2);
+                    prop_assert_eq!(refused.reached_executor(), !bridge_owned, "{}", line);
+                    let want_class = match case_shape {
+                        0 => "no target",
+                        2 => "malformed target",
+                        _ => "resume refused",
+                    };
+                    prop_assert_eq!(refused.class(), want_class);
+
+                    // ---- zero executor side effects, corroborated ----
+                    // The executor may have looked (collect, one store read);
+                    // it never focused and never launched, which are the only
+                    // two acting capabilities the trait exposes.
+                    prop_assert!(plat.focused.borrow().is_empty(), "{}", line);
+                    prop_assert!(plat.launched.borrow().is_empty(), "{}", line);
+                    prop_assert_eq!(plat.actions(), 0, "{}", line);
+
+                    // ---- zero agent spawns ----
+                    // No harness binary was planted in this sandbox at all, and
+                    // the resume path constructs no argv of its own — the
+                    // launch that *would* carry one was never made, which the
+                    // empty `launched` vector above already states (26.20).
+                    prop_assert_eq!(sandbox.invocations(), 0, "{}", line);
+
+                    // ---- no directory substitution ----
+                    // A resumable checkpoint for another session exists at
+                    // `decoy_dir`; the refusal names it nowhere and opened
+                    // nothing there (26.16).
+                    prop_assert!(
+                        !line.contains(decoy_text.as_str()),
+                        "a refusal named a substitute directory: {}",
+                        line
+                    );
+
+                    // ---- and the line says what it must ----
+                    // Exhaustive over the refusal type, so no refusal shape can
+                    // slip through unasserted; which `case_shape` produced each
+                    // one is already pinned by the `observed == want` check
+                    // above.
+                    match refused {
+                        // Naming the missing target: what was not entered,
+                        // what the chat does not record, and how to fix it.
+                        ResumeRefused::NoTarget => {
+                            prop_assert!(line.contains("no session id was entered"), "{}", line);
+                            prop_assert!(line.contains("records no context session"), "{}", line);
+                            prop_assert!(line.contains("sess_"), "{}", line);
+                        }
+                        ResumeRefused::MalformedTarget { entered } => {
+                            prop_assert_eq!(entered.as_str(), malformed.as_str());
+                            prop_assert!(line.contains(malformed.as_str()), "{}", line);
+                            prop_assert!(line.contains("nothing was looked up"), "{}", line);
+                        }
+                        // The two executor refusals carry the executor's own
+                        // reason. The expected text is written out here rather
+                        // than read back off the refusal, so "carries the
+                        // executor's reason" is compared against the reason.
+                        ResumeRefused::Executor { target: named, reason } => {
+                            let want_target = resolved
+                                .as_deref()
+                                .expect("an executor refusal had a resolved target");
+                            prop_assert_eq!(named.as_str(), want_target);
+                            let want_reason = if case_shape == 5 {
+                                match bad_dir_shape {
+                                    0 => "refusing non-absolute project dir".to_string(),
+                                    1 => format!("project directory unavailable: {missing_text}"),
+                                    _ => format!("project path is not a directory: {file_text}"),
+                                }
+                            } else {
+                                format!("unknown session {want_target} (no checkpoint)")
+                            };
+                            prop_assert_eq!(reason.as_str(), want_reason.as_str());
+                            prop_assert!(line.contains(want_reason.as_str()), "{}", line);
+                            prop_assert!(line.contains(want_target), "{}", line);
+                            // The two directory shapes the executor can name
+                            // are named (26.16); the non-absolute one is
+                            // refused by shape, and its reason says so.
+                            if case_shape == 5 && bad_dir_shape == 1 {
+                                prop_assert!(line.contains(missing_text.as_str()), "{}", line);
+                            }
+                            if case_shape == 5 && bad_dir_shape == 2 {
+                                prop_assert!(line.contains(file_text.as_str()), "{}", line);
+                            }
+                            if case_shape == 5 && bad_dir_shape == 0 {
+                                prop_assert!(line.contains("non-absolute"), "{}", line);
+                            }
+                        }
+                    }
+                }
+                Ok(done) => {
+                    // ---- success lines name the target and the operation ----
+                    let want_target = resolved.as_deref().expect("a success had a target");
+                    prop_assert_eq!(done.session_id(), want_target);
+                    prop_assert!(line.contains(want_target), "{}", line);
+                    prop_assert!(line.contains(done.operation()), "{}", line);
+
+                    // ---- exactly one operation, and it is the right one ----
+                    prop_assert_eq!(plat.actions(), 1, "{}", line);
+                    match done {
+                        ResumeDone::FocusedLive { .. } => {
+                            let focused = plat.focused.borrow();
+                            prop_assert_eq!(focused.len(), 1);
+                            prop_assert_eq!(focused[0].as_str(), "0x1");
+                            // 26.13, 28.7: a live target is focused, and no
+                            // terminal is opened even though a resumable
+                            // checkpoint exists for another session.
+                            prop_assert!(plat.launched.borrow().is_empty(), "{}", line);
+                        }
+                        ResumeDone::OpenedTerminal { directory, .. } => {
+                            let launched = plat.launched.borrow();
+                            prop_assert_eq!(launched.len(), 1);
+                            // 26.14, 26.16: the checkpoint's own directory,
+                            // never the decoy's and never a fallback.
+                            prop_assert_eq!(launched[0].directory.as_str(), good_text.as_str());
+                            prop_assert_ne!(launched[0].directory.as_str(), decoy_text.as_str());
+                            // 24.18, 26.20: a fixed argument vector with no
+                            // command at all, so there is no shell and no
+                            // agent process.
+                            prop_assert!(launched[0].command.is_empty(), "{:?}", launched[0]);
+                            prop_assert_eq!(directory.as_str(), good_text.as_str());
+                            prop_assert!(line.contains(good_text.as_str()), "{}", line);
+                            prop_assert!(plat.focused.borrow().is_empty(), "{}", line);
+                        }
+                    }
+                    prop_assert_eq!(sandbox.invocations(), 0, "a resume spawns no agent");
+                }
+            }
+        }
+    }
+
+    proptest! {
+        // 120 cases: 3 harnesses × (binary installed or not) × (runtime
+        // directory blocked or not) × 3 malformed-model shapes is 36
+        // combinations, and a third of the cases spawn the fake harness once.
+        #![proptest_config(ProptestConfig { cases: 120, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 26.19**
+        // Feature: pitwall-chat-and-brief-ticker, Property 27: Agent invocation validation order is preserved — For any invalid combination of session identifier, liveness, agent binary presence, model validity and project directory, the reported error is the one produced by the first failing stage of the existing order, and nothing downstream of that stage executes.
+        #[test]
+        fn prop27_agent_invocation_validation_order_is_preserved(
+            harness_ix in 0usize..crate::agents::KNOWN.len(),
+            install_binary in any::<bool>(),
+            block_runtime_dir in any::<bool>(),
+            bad_model_shape in 0usize..3,
+            marker in word(),
+            unknown_word in word(),
+        ) {
+            // **The scope decision, stated rather than glossed over.**
+            //
+            // Requirement 26.19 is conditional: *where* a Chat_Session
+            // invocation runs an agent binary, it applies "the existing
+            // validation order of session identifier shape, session liveness,
+            // agent binary presence, model validity, and project directory".
+            // That five-stage order is `assign::prepare`'s — and `assign`
+            // spawns a worker, discovers binaries on the *live* `PATH`, and is
+            // reached from `pitwall assign`, not from a chat. Chat never calls
+            // it. Chat reaches an agent through exactly one function,
+            // [`respond_in`], and reaches a workspace through exactly one
+            // other, [`resume_action`], which starts no agent at all (26.20)
+            // and is Property 26's subject.
+            //
+            // So this test is written over the order that actually governs a
+            // chat's agent invocation, which [`respond_in`] documents and
+            // performs: **delivery channel → binary → staged context → argv →
+            // run**. Stating the property over `assign::prepare`'s order
+            // instead would be testing a function no chat can call, on the
+            // live `PATH`, and would prove nothing about this surface.
+            //
+            // The two stages of 26.19's list that do not appear in that order
+            // are not missing — they live elsewhere on the chat path, and both
+            // are asserted below rather than left implicit:
+            //
+            // - **session identifier shape and liveness** belong to the resume
+            //   bridge, which runs no agent binary; the shape check precedes
+            //   any lookup there (26.11) and Property 26 asserts it.
+            // - **model validity** is a *capture-time* stage: 11.7 puts it in
+            //   [`ChatDescriptor::capture`], so a descriptor carrying an
+            //   invalid model does not exist and `respond_in` has no model
+            //   stage to fail. That is asserted at the end of this test.
+            let answer = format!("answer-{marker}");
+            let sandbox = Sandbox::new("p27");
+            let harness = crate::agents::KNOWN[harness_ix].id;
+            let binary_name = crate::agents::KNOWN[harness_ix].binary;
+
+            // Stage 2's input: the search path either holds this harness or is
+            // empty. It always exists, so "not installed" is the absence of
+            // one binary rather than the absence of a directory.
+            std::fs::create_dir_all(&sandbox.bin_dir).expect("bin dir");
+            if install_binary {
+                counting_harness(&sandbox.bin_dir, binary_name, &sandbox.log, &answer);
+            }
+
+            // Stage 3's input: a regular file occupying the runtime directory's
+            // own path, so `create_dir_all` refuses. Chosen over a permission
+            // change because it fails identically for an unprivileged and a
+            // root test runner.
+            let blocked = sandbox.root.join("blocked-run");
+            let runtime_dir = if block_runtime_dir {
+                std::fs::write(&blocked, "not a directory").expect("blocking file");
+                blocked.clone()
+            } else {
+                sandbox.runtime_dir.clone()
+            };
+
+            let plat = RecordingPlatform::quiet();
+            let d = descriptor_in(&sandbox, 9, harness, "", WORKSPACE_LABEL, None);
+            let observation = observe(&plat, &d, &sandbox.data_dir);
+            let question = question_of(&format!("what is {marker} doing?"));
+
+            // The first failing stage, taken from the generation choice. When
+            // both stage 2 and stage 3 are broken, the order says stage 2.
+            let want_stage = if !install_binary {
+                2
+            } else if block_runtime_dir {
+                3
+            } else {
+                0
+            };
+
+            let outcome = respond_in(
+                &d,
+                &observation,
+                &question,
+                &runtime_dir,
+                &sandbox.bin_dirs(),
+                Duration::from_secs(20),
+            );
+
+            match want_stage {
+                2 => {
+                    // The binary stage reports, *even when the staging stage
+                    // would also have failed* — which is the order claim.
+                    let want = ChatError::HarnessNotInstalled {
+                        harness: harness.to_string(),
+                    };
+                    prop_assert_eq!(outcome.as_ref().err(), Some(&want));
+                    prop_assert_eq!(want.class(), "harness not installed");
+                    // Nothing downstream of stage 2 ran: nothing was staged
+                    // and nothing was spawned.
+                    prop_assert!(sandbox.staged().is_empty(), "{:?}", sandbox.staged());
+                    prop_assert_eq!(sandbox.invocations(), 0);
+                }
+                3 => {
+                    let want = ChatError::ContextUnavailable;
+                    prop_assert_eq!(outcome.as_ref().err(), Some(&want));
+                    prop_assert_eq!(want.class(), "context unavailable");
+                    // Nothing downstream of stage 3 ran: the argv was never
+                    // built and the harness — which *is* installed in this
+                    // branch — was never invoked.
+                    prop_assert_eq!(sandbox.invocations(), 0);
+                }
+                _ => {
+                    // Every stage passed, so the run happened exactly once and
+                    // the harness's own answer came back. Without this branch
+                    // the two above would be claims about a path that never
+                    // works rather than about skipped work.
+                    prop_assert_eq!(
+                        outcome.as_ref().ok().map(String::as_str),
+                        Some(answer.as_str())
+                    );
+                    prop_assert_eq!(sandbox.invocations(), 1);
+                    prop_assert!(sandbox.staged().is_empty(), "{:?}", sandbox.staged());
+                }
+            }
+            prop_assert_eq!(sandbox.invocations(), usize::from(want_stage == 0));
+
+            // The blocked path is the observable evidence for stage 3: it is
+            // still the regular file it was, so no document was staged there.
+            // (`Sandbox::staged` looks at `sandbox.runtime_dir`, which is a
+            // different path in this branch, so it would be vacuous here.)
+            if block_runtime_dir {
+                prop_assert!(blocked.is_file(), "the blocked runtime path is still a file");
+                let held = std::fs::read_to_string(&blocked).unwrap_or_default();
+                prop_assert_eq!(held.as_str(), "not a directory");
+            }
+
+            // ---- stage 1 is total, and unreachable from any descriptor ----
+            // `capture` accepts only a `crate::agents::KNOWN` id and every one
+            // of those has a `DELIVERY` row, so no descriptor that exists can
+            // fail the delivery stage. That is a fact worth asserting rather
+            // than a gap: the guard stays total, so adding a harness without a
+            // verified private channel becomes a refusal, never a leak (§9.3).
+            for known in crate::agents::KNOWN {
+                prop_assert!(delivery_for(known.id).is_some(), "{}", known.id);
+            }
+            let not_a_harness = format!("harness-{unknown_word}");
+            prop_assert!(delivery_for(&not_a_harness).is_none(), "{}", not_a_harness);
+            let unknown = ChatDescriptor::capture(
+                9,
+                &not_a_harness,
+                "",
+                WORKSPACE_LABEL,
+                None,
+                0,
+                &sandbox.project_dir(),
+            );
+            prop_assert!(unknown.is_err(), "an unknown harness must refuse at capture");
+
+            // ---- model validity refuses at capture, before every stage ----
+            let bad_model = match bad_model_shape {
+                // No provider separator.
+                0 => format!("no-slash-{marker}"),
+                // Whitespace, which could otherwise split an argv element.
+                1 => format!("prov/{marker} with spaces"),
+                // Over the 128-character bound.
+                _ => format!("prov/{}", "m".repeat(200)),
+            };
+            prop_assert!(!crate::summary::valid_model(&bad_model), "{}", bad_model);
+            let refused = ChatDescriptor::capture(
+                9,
+                harness,
+                &bad_model,
+                WORKSPACE_LABEL,
+                None,
+                0,
+                &sandbox.project_dir(),
+            );
+            prop_assert!(refused.is_err(), "an invalid model must refuse");
+            prop_assert!(
+                refused.err().unwrap_or_default().contains("model"),
+                "the refusal must name the model stage"
+            );
+            // And nothing downstream of that stage can run, because there is
+            // no descriptor to run `respond_in` with: the invocation count is
+            // still exactly what the reachable stages above left it at.
+            prop_assert_eq!(sandbox.invocations(), usize::from(want_stage == 0));
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Task 13.4 (Rust half) — Property 29
+    // -----------------------------------------------------------------
+
+    /// Fragments a human's own turn text can be assembled from. Several are
+    /// made entirely of the characters Requirement 20.11 forbids the
+    /// *renderer* to add — see the note inside the test about whose
+    /// characters those are.
+    const TURN_TEXT_FRAGMENTS: &[&str] = &[
+        "the box is drawn",
+        "\u{250c}\u{2500}\u{2500}\u{2510}",
+        "\u{2502} bubble \u{2502}",
+        "\u{2514}\u{2500}\u{2500}\u{2518}",
+        "\u{2588}\u{2593}\u{2592}\u{2591}",
+        "\u{2550}\u{2551}\u{256c}",
+        "+---+ | pane | +---+",
+        "  leading and trailing   ",
+        "caf\u{00e9} \u{4e2d}\u{6587}",
+        "",
+    ];
+
+    /// Frame characters outside the box-drawing and block-element ranges: the
+    /// ASCII approximations a "bordered bubble" is usually drawn with, the
+    /// geometric shapes a simulated widget uses, and the emoji variation
+    /// selector that dresses one up.
+    const FRAME_CHARS: &[char] = &[
+        '|', '+', '-', '=', '_', '#', '*', '~', '\u{2b1b}', '\u{2b1c}', '\u{25a0}', '\u{25a1}',
+        '\u{25ac}', '\u{25ad}', '\u{fe0f}',
+    ];
+
+    proptest! {
+        // 256 cases: 2 roles × 10 fragments in 1..6 positions × 3 joiners ×
+        // a generated epoch. Pure — no sandbox, no store, no harness.
+        #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 20.10, 20.11**
+        // Feature: pitwall-chat-and-brief-ticker, Property 29: Conversation turns render as plain labelled lines — For any turn role, text and timestamp, the rendered turn begins with the role label and a timestamp, contains no box-drawing or border characters, and contains no simulated widget scaffolding.
+        #[test]
+        fn prop29_conversation_turns_render_as_plain_labelled_lines(
+            is_you in any::<bool>(),
+            epoch in -86_400i64..4_000_000_000i64,
+            body in proptest::collection::vec(0usize..TURN_TEXT_FRAGMENTS.len(), 1..6),
+            joiner in 0usize..3,
+        ) {
+            // **Whose characters are whose.** 20.11 forbids the *renderer*
+            // from adding bordered chat bubbles, dashboard panes and
+            // simulated widgets. It does not — and must not — forbid a human
+            // from typing `\u{250c}\u{2500}\u{2500}\u{2510}` into a question:
+            // censoring a person's own words would be a different and worse
+            // behaviour than the one being prevented. So every assertion below
+            // is about the characters the renderer *contributes*, never about
+            // the characters that merely *appear*.
+            //
+            // That distinction is made structurally rather than by guesswork.
+            // `render_turn` produces exactly:
+            //
+            //     line 0    := "<role label>" + "  " + "<clock>"
+            //     line 1+n  := "  " + <the turn's own nth text line>
+            //
+            // so the scaffolding is line 0 plus one two-space indent per text
+            // line, and nothing else. Each rendered line after the first is
+            // checked character for character against its text line with that
+            // indent, and the scaffolding is then collected and checked on its
+            // own. A box-drawing character in the output is therefore provably
+            // the human's; a box-drawing character in the scaffolding is a
+            // failure. The last assertion in the test closes the loop by
+            // requiring the human's own forbidden characters to have survived,
+            // so this cannot pass by censoring them.
+            let sep = match joiner {
+                0 => "\n",
+                1 => " ",
+                _ => "\t",
+            };
+            let text = body
+                .iter()
+                .map(|ix| TURN_TEXT_FRAGMENTS[*ix])
+                .collect::<Vec<&str>>()
+                .join(sep);
+            let role = if is_you { Role::You } else { Role::Pitwall };
+            let turn = Turn::new(role, epoch, &text);
+
+            // The deterministic non-colour palette, so no SGR sequence can sit
+            // between a substring assertion and what it is looking for.
+            let palette = Palette::plain();
+            prop_assert!(!palette.is_coloured());
+            let rendered = render_turn(&turn, palette);
+            prop_assert!(!rendered.contains('\u{1b}'), "{:?}", rendered);
+
+            // ---- the role label and a timestamp lead the line (20.10) ----
+            let clock = format_clock_utc(turn.at_epoch());
+            let head = format!("{}  {}", role.label(), clock);
+            let rendered_lines: Vec<&str> = rendered.lines().collect();
+            let first = *rendered_lines
+                .first()
+                .expect("a rendered turn has at least one line");
+            prop_assert_eq!(first, head.as_str());
+            prop_assert!(rendered.starts_with(role.label()), "{:?}", rendered);
+            let other = if is_you { Role::Pitwall } else { Role::You };
+            prop_assert!(!first.starts_with(other.label()), "{}", first);
+            // A timestamp, and a well-formed one.
+            prop_assert!(first.ends_with(" UTC"), "{}", first);
+            let hhmm = clock.trim_end_matches(" UTC");
+            let (hh, mm) = hhmm.split_once(':').expect("the clock is HH:MM UTC");
+            prop_assert_eq!(hh.len(), 2);
+            prop_assert_eq!(mm.len(), 2);
+            prop_assert!(hh.parse::<u32>().expect("two digits") < 24, "{}", hh);
+            prop_assert!(mm.parse::<u32>().expect("two digits") < 60, "{}", mm);
+            // A negative epoch is clamped, so no turn presents a pre-epoch
+            // clock.
+            prop_assert!(turn.at_epoch() >= 0);
+
+            // ---- the renderer adds exactly a two-space indent per line ----
+            let text_lines: Vec<&str> = turn.text().lines().collect();
+            prop_assert_eq!(rendered_lines.len(), text_lines.len() + 1);
+            prop_assert!(rendered.ends_with('\n'), "{:?}", rendered);
+            let mut scaffolding = String::from(first);
+            for (rendered_line, text_line) in rendered_lines[1..].iter().zip(text_lines.iter()) {
+                let want_line = format!("  {text_line}");
+                prop_assert_eq!(*rendered_line, want_line.as_str());
+                let indent = &rendered_line[..2];
+                prop_assert_eq!(indent, "  ");
+                scaffolding.push_str(indent);
+                scaffolding.push('\n');
+            }
+
+            // ---- and that scaffolding carries no border and no widget ----
+            for c in scaffolding.chars() {
+                prop_assert!(
+                    !('\u{2500}'..='\u{257f}').contains(&c),
+                    "the renderer contributed box drawing {:?}",
+                    c
+                );
+                prop_assert!(
+                    !('\u{2580}'..='\u{259f}').contains(&c),
+                    "the renderer contributed a block element {:?}",
+                    c
+                );
+                prop_assert!(
+                    !FRAME_CHARS.contains(&c),
+                    "the renderer contributed a frame character {:?}",
+                    c
+                );
+            }
+            // The total form of the same claim: the only characters the
+            // renderer contributes at all are the label, the clock and
+            // whitespace. Any border, pane edge or widget dressing whatsoever
+            // — including one nobody thought to enumerate above — would have
+            // to be one of these.
+            prop_assert!(
+                scaffolding
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == ' ' || c == '\n'),
+                "unexpected scaffolding {:?}",
+                scaffolding
+            );
+            // A turn is not a header: the renderer adds no wordmark and no
+            // divider of its own, so the conversation area is turns and
+            // nothing else.
+            prop_assert!(!scaffolding.contains(WORDMARK), "{:?}", scaffolding);
+
+            // ---- what is presented is what was asserted ----
+            let mut sink: Vec<u8> = Vec::new();
+            print_turn(&mut sink, &turn, palette).expect("writing to a Vec cannot fail");
+            let printed = String::from_utf8_lossy(&sink).into_owned();
+            prop_assert_eq!(printed.as_str(), rendered.as_str());
+
+            // ---- the human's own words survived ----
+            // Without this, every assertion above would also hold for a
+            // renderer that stripped the human's text, which is not the
+            // behaviour 20.11 asks for.
+            for line in &text_lines {
+                prop_assert!(rendered.contains(*line), "{:?} was dropped", line);
+            }
+            let human_drew_a_box = turn
+                .text()
+                .chars()
+                .any(|c| ('\u{2500}'..='\u{257f}').contains(&c));
+            if human_drew_a_box {
+                prop_assert!(
+                    rendered
+                        .chars()
+                        .any(|c| ('\u{2500}'..='\u{257f}').contains(&c)),
+                    "the human's own box-drawing characters must not be censored"
+                );
+            }
+        }
+    }
+}
