@@ -290,6 +290,8 @@ The visual pass labels the summary surface `AI BRIEF` and uses a subdued
 palette-bound surface; the installed panel was updated, but a live
 Quickshell restart/click-through remains unverified because of the existing
 duplicate IPC handler.
+The marquee now measures the complete brief text, moves right-to-left at
+180 px/sec, and pauses in place through the animation's `paused` state.
 Directions: AI Workforce Design + community Recipes (see
 `docs/AI_WORKFORCE.md`, `docs/RECIPES.md`). Contribute: recipes,
 patterns, Omarchy integration, detection, docs, tests. MIT.

@@ -30,6 +30,8 @@
   files created (`agent_master.md`, child stories, `.agents/`).
 - **M7 — SummaryContext**: implemented and pushed (`cef1b95`, privacy fix
   `313a42e`); summary hashing now consumes one bounded structured context.
+- **M7 — Visual/ticker pass**: pushed (`6349cd6`, hierarchy `0aa9a10`);
+  full-content marquee at 180 px/sec and subdued activity/group treatment.
 
 ## Completed work
 

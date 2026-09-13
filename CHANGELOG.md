@@ -16,6 +16,11 @@ All notable changes to Pitwall are documented here. Format follows
 - M7 visual pass: labeled the summary surface as `AI BRIEF`, added a compact
   subdued palette-bound brief surface, and kept the session rail visually
   primary. No chat affordance is shown while Chat remains deferred.
+- M7 ticker correction: the brief now uses the complete measured summary
+  text in a right-to-left marquee at 180 px/sec, pausing in place on hover or
+  expansion and restarting only when the summary changes.
+- M7 hierarchy refinement: group headers gained subdued native separators and
+  the activity rail was thinned to read as state history, not completion.
 - M7 `SummaryContext`: one deterministic, bounded, scrubbed structured
   context now feeds summary hashing and future workspace-aware surfaces.
   Interactive Chat remains deferred pending a safe question execution path.
