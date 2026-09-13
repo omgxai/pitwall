@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d8a704559db4bc0f4b5f91c0141741582395ad248b0066c3342477a0d12df5bb # shrinks to marker = "a0aa", harness_ix = 0, model_ix = 0, label_ix = 0, number = 1, secret_shape = 2, context = None
+cc 85e0696e034db31408b8400bb5f78100e370e54c5f887c881efbf00360601720 # shrinks to kinds = [9, 5], marker = "aa00", target = "sess_0aa000a00a000aaa"
+cc ab86ea63f14e358a134bd57dd01047ce1a5f1b306a5ef85645a1d7c290662693 # shrinks to kinds = [2, 5, 4, 10], marker = "aoa98", unknown_target = "sess_63dba1b45cf9be88", target_shape = 1
