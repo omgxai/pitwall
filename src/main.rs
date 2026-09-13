@@ -2227,4 +2227,536 @@ mod tests {
     fn the_clear_sequence_is_exactly_erase_and_home() {
         assert_eq!(CLEAR_SCREEN, "\u{1b}[2J\u{1b}[H");
     }
+
+    // -----------------------------------------------------------------
+    // Property tests (M8 task 12.3). `proptest` is a dev-dependency pinned
+    // `=1.5.0`; each design property below is exactly ONE test at 100+
+    // cases. Both tests go through the same pure seams the example tests
+    // above use, so no case scans PATH, observes the workspace, allocates a
+    // lease, launches a terminal or spawns a harness.
+    //
+    // **Which startup stage is covered where.** Design §4.3 documents six
+    // validation stages before the run loop:
+    //
+    // 1. unknown option — usage, exit 2 — Property 9, through
+    //    `chat_usage_check`.
+    // 2. `--session` shape — usage, exit 2 — Property 9, through
+    //    `chat_usage_check`.
+    // 3. model validity — usage, exit 2 — Property 9, through
+    //    `chat_usage_check`.
+    // 4. harness known + installed — operational, exit 1 — Property 9,
+    //    through `chat_harness_check`.
+    // 5. session liveness — operational, exit 1 — *class only* in Property 9.
+    //    The lookup itself needs a `Platform` observation, so the stage rests
+    //    on `cmd_chat`'s composition order and on the live gate.
+    // 6. number availability — operational, exit 1 — *class only* in
+    //    Property 9. Allocation needs the runtime directory and is covered by
+    //    `chat::allocate_chat_number`'s own tests and the live gate.
+    //
+    // Being honest about that boundary matters more than a bigger-looking
+    // property: stages 1-4 are decidable from arguments plus two booleans and
+    // are therefore quantified over here; stages 5 and 6 are environmental,
+    // and what Property 9 can still state about them — that both are
+    // operational and both exit 1, whatever value they carry — it does state.
+    // -----------------------------------------------------------------
+
+    use proptest::prelude::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Tokens `pitwall chat` does not accept. None of them is `--session`, so
+    /// every one of them is a stage-1 fault when it is parsed as an option —
+    /// including the two positional forms, which the parser refuses for the
+    /// same reason (`a_positional_argument_is_an_unknown_option`).
+    const UNKNOWN_OPTIONS: &[&str] = &[
+        "--nope",
+        "-x",
+        "--session=sess_0123456789abcdef",
+        "--help",
+        "--json",
+        "sess_0123456789abcdef",
+        "extra",
+    ];
+
+    /// Values outside `sess_[0-9a-f]{16}`: too short, too long, wrong case,
+    /// wrong prefix, no prefix. Each fails
+    /// [`pitwall_lib::resume::is_session_id`], which is the stage-2 check.
+    const MALFORMED_SESSIONS: &[&str] = &[
+        "nope",
+        "sess_",
+        "sess_0123",
+        "sess_0123456789ABCDEF",
+        "sess_0123456789abcdefg",
+        "0123456789abcdef",
+        "chat_0123456789abcdef",
+    ];
+
+    /// Values that fail [`pitwall_lib::summary::valid_model`]: no `/`, or a
+    /// character outside its charset (space, `|`, a control byte). None of
+    /// them is empty, because empty is the *legitimate* agent-default case.
+    const MALFORMED_MODELS: &[&str] = &[
+        "no slash here",
+        "nostash",
+        "has space/model",
+        "bad|model/x",
+        "prov/model with space",
+        "prov/model\u{7f}",
+    ];
+
+    /// Context labels a chat could really carry, including
+    /// [`chat::WORKSPACE_LABEL`] (the label a chat with no context session
+    /// gets, 16.4), a one-character label, a multi-word label and a
+    /// multi-byte one.
+    const CONTEXT_LABELS: &[&str] = &[
+        "Workspace",
+        "pitwall",
+        "my project",
+        "café",
+        "a",
+        "A label with several words in it",
+    ];
+
+    /// A well-formed Pitwall-local session id.
+    fn session_id_strategy() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("sess_[0-9a-f]{16}").expect("static regex")
+    }
+
+    /// A model id that passes [`pitwall_lib::summary::valid_model`]: contains
+    /// `/`, stays inside its charset, at most 22 characters.
+    fn valid_model_strategy() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("[a-z]{1,8}/[a-z0-9][a-z0-9.:_-]{0,12}")
+            .expect("static regex")
+    }
+
+    static PROP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// A real, private directory per case.
+    /// [`chat::ChatDescriptor::capture`] validates that `project_dir` is
+    /// absolute and an existing directory, so the generator has to produce a
+    /// real one rather than a plausible string. Unique per process and per
+    /// case, so 100+ cases and parallel test threads never share it.
+    fn prop_project_dir() -> PathBuf {
+        let n = PROP_SEQ.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("pitwall-m8-prop-chat-{pid}-{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a private sandbox directory");
+        dir
+    }
+
+    proptest! {
+        // 336 cases, well above the 100 floor: 2 (unknown option present) ×
+        // 2 (written before or after the session option) × 7 unknown-option
+        // tokens × 4 `--session` shapes (absent, well-formed, malformed,
+        // dangling) × 3 model shapes (empty, valid, malformed) × 3 harness
+        // shapes (installed, known-but-absent, unknown) — 1008 fault
+        // combinations — sampled over generated session ids, model ids and
+        // harness names.
+        #![proptest_config(ProptestConfig { cases: 336, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 9.4, 9.6, 11.6, 11.7, 23.2**
+        // Feature: pitwall-chat-and-brief-ticker, Property 9: Startup refusals are complete and correctly classed — For any invocation of `pitwall chat`, the first failing validation stage in the documented order (unknown option → session shape → model validity → harness installed → session liveness → number availability) determines the outcome, usage-class failures exit 2, operational failures exit 1, and no terminal, harness or context file is created on any refusal path.
+        #[test]
+        fn prop9_startup_refusals_are_complete_and_correctly_classed(
+            // Grouped one stage per parameter: stage 1, stage 2, stage 3,
+            // stage 4, and the two environmental stages whose class alone is
+            // checkable here.
+            option_spec in (any::<bool>(), any::<bool>(), 0usize..UNKNOWN_OPTIONS.len()),
+            session_spec in (0usize..4, 0usize..MALFORMED_SESSIONS.len(), session_id_strategy()),
+            model_spec in (0usize..3, valid_model_strategy(), 0usize..MALFORMED_MODELS.len()),
+            harness_spec in (
+                0usize..3,
+                0usize..pitwall_lib::agents::KNOWN.len(),
+                proptest::string::string_regex("[g-z]{3,10}").expect("static regex"),
+            ),
+            later_spec in (
+                session_id_strategy(),
+                proptest::string::string_regex("[a-z0-9 .]{1,40}").expect("static regex"),
+            ),
+        ) {
+            let (option_fault, option_first, option_ix) = option_spec;
+            let (session_kind, malformed_session_ix, session_id) = session_spec;
+            let (model_kind, valid_model_id, malformed_model_ix) = model_spec;
+            let (harness_kind, harness_ix, unknown_harness) = harness_spec;
+            let (live_session_id, exhausted_reason) = later_spec;
+
+            // ---- the invocation: several simultaneous faults -------------
+            //
+            // This is what makes the ordering a property rather than an
+            // example. A generated case may carry an unknown option *and* a
+            // malformed `--session` *and* a malformed model *and* a harness
+            // that is unknown or absent, all at once, with the unknown option
+            // written either before or after the session option. Exactly one
+            // of those faults may decide the outcome: the first stage's.
+            let unknown_option = UNKNOWN_OPTIONS[option_ix];
+            let session_tokens: Vec<String> = match session_kind {
+                0 => Vec::new(),                                              // no --session
+                1 => argv(&["--session", session_id.as_str()]),               // well-formed
+                2 => argv(&["--session", MALFORMED_SESSIONS[malformed_session_ix]]),
+                _ => argv(&["--session"]),                                    // dangling flag
+            };
+            let mut args: Vec<String> = Vec::new();
+            if option_fault && option_first {
+                args.push(unknown_option.to_string());
+            }
+            args.extend(session_tokens);
+            if option_fault && !option_first {
+                args.push(unknown_option.to_string());
+            }
+
+            let model = match model_kind {
+                0 => String::new(),                       // agent default: legitimate
+                1 => valid_model_id.clone(),
+                _ => MALFORMED_MODELS[malformed_model_ix].to_string(),
+            };
+            let harness = match harness_kind {
+                2 => unknown_harness.clone(),             // not a KNOWN id
+                _ => pitwall_lib::agents::KNOWN[harness_ix].id.to_string(),
+            };
+            let installed = harness_kind == 0;
+
+            // ---- the oracle: which stage owns this invocation ------------
+            //
+            // One wrinkle is modelled rather than assumed away: a dangling
+            // `--session` consumes whatever token follows it, so an unknown
+            // option written *after* it becomes that option's *value* instead
+            // of a separate fault — and then stage 2 judges it, which for the
+            // one well-shaped id in `UNKNOWN_OPTIONS` means stage 2 passes.
+            const ABSENT: usize = 0;
+            const WELL_FORMED: usize = 1;
+            const MALFORMED: usize = 2;
+            const DANGLING: usize = 3;
+            let (stage1_fault, session_stage) =
+                if session_kind == DANGLING && option_fault && !option_first {
+                    let absorbed = unknown_option;
+                    let stage = if pitwall_lib::resume::is_session_id(absorbed) {
+                        WELL_FORMED
+                    } else {
+                        MALFORMED
+                    };
+                    (false, stage)
+                } else {
+                    (option_fault, session_kind)
+                };
+
+            let expected: Option<ChatRefusal> = if stage1_fault {
+                Some(ChatRefusal::UnknownOption {
+                    entered: unknown_option.to_string(),
+                })
+            } else if session_stage == DANGLING {
+                Some(ChatRefusal::SessionValueMissing)
+            } else if session_stage == MALFORMED {
+                Some(ChatRefusal::MalformedSession)
+            } else if model_kind == 2 {
+                Some(ChatRefusal::MalformedModel)
+            } else if harness_kind == 2 {
+                Some(ChatRefusal::UnknownHarness {
+                    harness: harness.clone(),
+                })
+            } else if harness_kind == 1 {
+                Some(ChatRefusal::HarnessNotInstalled {
+                    harness: harness.clone(),
+                })
+            } else {
+                None
+            };
+
+            // ---- the pipeline, in the documented order -------------------
+            //
+            // Composed exactly as `cmd_chat` composes it: steps 1-3 first
+            // (`chat_usage_check`), then step 4 (`chat_harness_check`).
+            // `discovery_calls` stands for the PATH scan `cmd_chat` performs
+            // between them (`agents::discover_in(agents::path_dirs())`) —
+            // the *first* environmental act of the startup path — so counting
+            // it is how "nothing downstream of the failing stage executes" is
+            // checked mechanically rather than asserted in prose.
+            let mut discovery_calls = 0usize;
+            let mut parsed_session: Option<String> = None;
+            let outcome: Option<ChatRefusal> = match chat_usage_check(&args, &model) {
+                Err(refusal) => Some(refusal),
+                Ok(session) => {
+                    discovery_calls += 1;
+                    parsed_session = session;
+                    chat_harness_check(&harness, installed).err()
+                }
+            };
+
+            // ---- (1) the first failing stage decides the outcome ---------
+            prop_assert_eq!(
+                outcome.clone(),
+                expected.clone(),
+                "args={args:?} model_kind={model_kind} harness_kind={harness_kind} installed={installed}"
+            );
+
+            // ---- (2) the class of that outcome (23.2) --------------------
+            match outcome.as_ref() {
+                Some(refusal) => {
+                    let usage = matches!(
+                        refusal,
+                        ChatRefusal::UnknownOption { .. }
+                            | ChatRefusal::SessionValueMissing
+                            | ChatRefusal::MalformedSession
+                            | ChatRefusal::MalformedModel
+                    );
+                    prop_assert_eq!(refusal.code(), if usage { 2u8 } else { 1u8 });
+
+                    // One printable line, never empty, never multi-line.
+                    let message = refusal.message();
+                    prop_assert!(!message.trim().is_empty(), "{refusal:?}");
+                    prop_assert!(!message.contains('\n'), "{refusal:?}");
+
+                    // A malformed value is named by class and never echoed, so
+                    // a hostile `--session` or model can never reach the
+                    // terminal through a refusal line.
+                    if matches!(refusal, ChatRefusal::MalformedSession) {
+                        prop_assert_eq!(message.as_str(), "malformed session ID (refusing)");
+                    }
+                    if matches!(refusal, ChatRefusal::MalformedModel) {
+                        prop_assert_eq!(message.as_str(), "malformed model id (refusing)");
+                    }
+
+                    // ---- (3) nothing downstream of the failing stage ran --
+                    //
+                    // A usage-class refusal is reached before the PATH scan,
+                    // so no environmental act happened at all. An operational
+                    // stage-4 refusal is reached after exactly that one scan
+                    // and before everything after it. Neither
+                    // `chat_usage_check` nor `chat_harness_check` takes a
+                    // `&dyn Platform`, a path or a database handle, so
+                    // neither contains an expression that *could* launch a
+                    // terminal, spawn a harness or create a context file —
+                    // this counter is the observable half of that structural
+                    // claim: the refusal returns upstream of every call site
+                    // in `cmd_chat` that can create anything (the
+                    // `launch_terminal` call, `allocate_chat_number`, and
+                    // `EphemeralContext::create_owned`).
+                    prop_assert_eq!(discovery_calls, usize::from(!usage));
+                    prop_assert!(parsed_session.is_none() || !usage);
+                }
+                None => {
+                    // No fault: the parse ran to completion, the scan happened,
+                    // and the session it carries through is either absent (a
+                    // whole-workspace chat, 9.3) or well-shaped.
+                    prop_assert_eq!(discovery_calls, 1);
+                    prop_assert_eq!(session_stage == ABSENT, parsed_session.is_none());
+                    if let Some(id) = parsed_session.as_deref() {
+                        prop_assert!(pitwall_lib::resume::is_session_id(id));
+                    }
+                }
+            }
+
+            // ---- (4) the headline consequence of the ordering ------------
+            //
+            // A malformed `--session` exits 2 even when the configured
+            // harness is unknown or missing: the class follows the *first*
+            // failing stage, not the most serious fault present.
+            if !stage1_fault && session_stage == MALFORMED && harness_kind != 0 {
+                prop_assert_eq!(outcome.as_ref().map(ChatRefusal::code), Some(2u8));
+            }
+            // And symmetrically: with no usage-class fault at all, a harness
+            // fault is the outcome and exits 1.
+            if !stage1_fault
+                && session_stage != MALFORMED
+                && session_stage != DANGLING
+                && model_kind != 2
+                && harness_kind != 0
+            {
+                prop_assert_eq!(outcome.as_ref().map(ChatRefusal::code), Some(1u8));
+            }
+
+            // ---- (5) stages 5 and 6: class only ------------------------
+            //
+            // Session liveness needs a `collector::collect` observation and
+            // number availability needs the runtime directory, so neither is
+            // decidable inside this pure seam (see the table above). What is
+            // decidable here is that both belong to the operational class for
+            // any value they could carry, which is the half of "correctly
+            // classed" that generalises.
+            let not_live = ChatRefusal::SessionNotLive {
+                session_id: live_session_id.clone(),
+            };
+            let exhausted = ChatRefusal::NoChatNumber {
+                reason: exhausted_reason.clone(),
+            };
+            prop_assert_eq!(not_live.code(), 1u8);
+            prop_assert_eq!(exhausted.code(), 1u8);
+            prop_assert!(not_live.message().contains(live_session_id.as_str()));
+            prop_assert!(!not_live.message().contains('\n'));
+            prop_assert!(!exhausted.message().contains('\n'));
+
+            // ---- (6) the seam is pure: same inputs, same answer ---------
+            prop_assert_eq!(
+                chat_usage_check(&args, &model).err(),
+                chat_usage_check(&args, &model).err()
+            );
+            prop_assert_eq!(
+                chat_harness_check(&harness, installed).err(),
+                chat_harness_check(&harness, installed).err()
+            );
+        }
+    }
+
+    proptest! {
+        // 192 cases, well above the 100 floor: 3 number magnitudes (one, two
+        // and three significant digits, so the zero padding is exercised) × 2
+        // model shapes (empty and valid) × 7 context labels (six fixed,
+        // including `Workspace`, plus a generated one) × 2 context scopes
+        // (session-scoped and workspace-scoped) × 3 harnesses, over generated
+        // numbers, models, labels, session ids and start epochs.
+        #![proptest_config(ProptestConfig { cases: 192, ..ProptestConfig::default() })]
+
+        // **Validates: Requirements 11.8, 16.2, 20.1, 20.2**
+        // Feature: pitwall-chat-and-brief-ticker, Property 10: Header and title carry every descriptor fact — For any Chat_Descriptor, both the Chat_Header and the window title contain the literal `Pitwall Chat`, the three-digit Chat_Number, the Harness, the Model (or the agent-default label when the Model is empty) and the Context_Label; the header additionally labels the start time.
+        #[test]
+        fn prop10_header_and_title_carry_every_descriptor_fact(
+            // One parameter per descriptor fact. The number arrives as three
+            // magnitudes plus a selector so one-, two- and three-digit
+            // numbers are all reached often, rather than 1..=999 uniformly
+            // (which would almost never produce a `007`).
+            number_spec in (0usize..3, 1u16..=9u16, 10u16..=99u16, 100u16..=999u16),
+            harness_ix in 0usize..pitwall_lib::agents::KNOWN.len(),
+            model_spec in (any::<bool>(), valid_model_strategy()),
+            label_spec in (
+                0usize..(CONTEXT_LABELS.len() + 1),
+                proptest::string::string_regex("[A-Za-z][A-Za-z0-9 _.-]{0,47}")
+                    .expect("static regex"),
+            ),
+            session_spec in (any::<bool>(), session_id_strategy()),
+            epoch in 0i64..2_000_000_000i64,
+        ) {
+            let (number_kind, small_number, mid_number, big_number) = number_spec;
+            let (model_empty, valid_model_id) = model_spec;
+            let (label_ix, generated_label) = label_spec;
+            let (with_session, session_id) = session_spec;
+
+            // ---- the descriptor ----------------------------------------
+            let number = match number_kind {
+                0 => small_number,   // presented as `007`, never as `7`
+                1 => mid_number,
+                _ => big_number,
+            };
+            let harness = pitwall_lib::agents::KNOWN[harness_ix].id;
+            let model = if model_empty { String::new() } else { valid_model_id.clone() };
+            let label = match CONTEXT_LABELS.get(label_ix) {
+                Some(fixed) => (*fixed).to_string(),
+                None => generated_label.clone(),
+            };
+            // The label is compared against the agent-default literal below;
+            // a label that happened to contain it would make that comparison
+            // meaningless rather than false.
+            prop_assume!(!label.contains(chat::AGENT_DEFAULT_LABEL));
+            let session = if with_session { Some(session_id.clone()) } else { None };
+
+            let dir = prop_project_dir();
+            let dir_text = dir
+                .to_str()
+                .expect("a temp path is UTF-8 on the platforms Pitwall supports")
+                .to_string();
+            let d = chat::ChatDescriptor::capture(
+                number,
+                harness,
+                &model,
+                &label,
+                session.as_deref(),
+                epoch,
+                &dir_text,
+            )
+            .expect("every generated value is inside the documented input space");
+            // Nothing below reads the filesystem — the descriptor carries the
+            // directory as an already-validated string, and both renderers are
+            // pure — so the sandbox goes now. That also means a failing case
+            // leaves no directory behind.
+            let _ = std::fs::remove_dir_all(&dir);
+
+            // ---- the two presentations ---------------------------------
+            //
+            // A plain palette on purpose: `Palette::plain()` emits no SGR
+            // sequence anywhere, so every containment assertion below is
+            // about presented text and cannot be satisfied — or defeated — by
+            // an escape sequence sitting between a label and its value. The
+            // coloured palette wraps the same strings and is covered by the
+            // example tests in `chat.rs`.
+            let palette = chat::Palette::plain();
+            prop_assert!(!palette.is_coloured());
+            let header = chat::render_header(&d, palette);
+            let title = chat::format_title(&d);
+            prop_assert!(!header.contains('\u{1b}'), "plain palette emits no SGR: {header:?}");
+            prop_assert!(!title.contains('\u{1b}'), "{title:?}");
+
+            // ---- (1) the literal `Pitwall Chat` ------------------------
+            prop_assert!(title.contains(chat::CHAT_LABEL), "{title:?}");
+            prop_assert!(header.contains(chat::CHAT_LABEL), "{header:?}");
+
+            // ---- (2) the three-digit Chat_Number -----------------------
+            let number_text = d.number_text();
+            prop_assert_eq!(number_text.len(), 3);
+            prop_assert!(number_text.bytes().all(|b| b.is_ascii_digit()));
+            prop_assert_eq!(number_text.clone(), format!("{number:03}"));
+            let labelled = format!("{} {}", chat::CHAT_LABEL, number_text);
+            prop_assert!(title.starts_with(&labelled), "{title:?}");
+            prop_assert!(header.contains(&labelled), "{header:?}");
+            // The header repeats the same three digits as a labelled field, so
+            // the padded form is presented twice and the bare `7` never.
+            prop_assert!(header.contains("Session ID"), "{header:?}");
+            prop_assert!(header.matches(number_text.as_str()).count() >= 2, "{header:?}");
+
+            // ---- (3) the Harness ---------------------------------------
+            prop_assert!(title.contains(harness), "{title:?}");
+            prop_assert!(header.contains(harness), "{header:?}");
+            prop_assert!(header.contains("Harness"), "{header:?}");
+
+            // ---- (4) the Model, or the agent-default label -------------
+            let model_label = d.model_label().to_string();
+            if model.is_empty() {
+                prop_assert_eq!(model_label.as_str(), chat::AGENT_DEFAULT_LABEL);
+            } else {
+                prop_assert_eq!(model_label.as_str(), model.as_str());
+                // A configured model is never quietly presented as the default.
+                prop_assert!(!title.contains(chat::AGENT_DEFAULT_LABEL), "{title:?}");
+                prop_assert!(!header.contains(chat::AGENT_DEFAULT_LABEL), "{header:?}");
+            }
+            prop_assert!(title.contains(&model_label), "{title:?}");
+            prop_assert!(header.contains(&model_label), "{header:?}");
+            prop_assert!(header.contains("Model"), "{header:?}");
+
+            // ---- (5) the Context_Label ---------------------------------
+            //
+            // The title's label field is either the whole label or a prefix of
+            // it (the one field that gives up its tail to the 200-char title
+            // cap), never a substitution. Within this generator the head is at
+            // most 55 characters of the 200 — `Pitwall Chat NNN` (16), three
+            // separators (9), a harness id (≤ 8) and a model label (≤ 22) —
+            // leaving the full 48-character label budget, so the label is in
+            // fact emitted whole.
+            let emitted_label = chat::title_context_label(&d);
+            prop_assert!(label.starts_with(&emitted_label), "{emitted_label:?}");
+            prop_assert_eq!(emitted_label.as_str(), label.as_str());
+            prop_assert!(title.contains(&label), "{title:?}");
+            prop_assert!(header.contains(&label), "{header:?}");
+            prop_assert!(header.contains("Workspace"), "{header:?}");
+
+            // ---- (6) the title is exactly the grammar, nothing invented --
+            prop_assert_eq!(
+                title.clone(),
+                format!(
+                    "{} {} \u{00b7} {} \u{00b7} {} \u{00b7} {}",
+                    chat::CHAT_LABEL,
+                    number_text,
+                    harness,
+                    model_label,
+                    label
+                )
+            );
+
+            // ---- (7) the header additionally labels the start time ------
+            prop_assert!(header.contains("Started"), "{header:?}");
+            let started = chat::format_epoch_utc(epoch);
+            prop_assert!(header.contains(&started), "{started} missing from {header:?}");
+
+            // ---- (8) the header names its own scope (20.3) --------------
+            match session.as_deref() {
+                Some(id) => prop_assert!(header.contains(id), "{header:?}"),
+                None => prop_assert!(header.contains("the whole observed workspace"), "{header:?}"),
+            }
+        }
+    }
 }

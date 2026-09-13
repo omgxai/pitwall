@@ -24,8 +24,12 @@ SEE → UNDERSTAND → REMEMBER → RESUME → CONTROL → DELEGATE → NOTIFY
 > remains deliberately compact and Omarchy-native.
 > `pitwall status` observes · `snapshot` persists · `checkpoint`
 > records · `resume` focuses or reopens · `summarize` asks your
-> configured agent (cached locally) · `assign` runs a validated task
+> configured agent (cached locally) · `chat` opens a native terminal
+> conversation about the workspace · `assign` runs a validated task
 > on a live session · `notifications` lists human-relevant events.
+> M8 (Pitwall Chat + the corrected AI brief ticker) is implemented but
+> **not yet verified on an Omarchy runtime** — see
+> [Pitwall Chat](#pitwall-chat).
 > Plan: [docs/NEXT_SPRINT.md](docs/NEXT_SPRINT.md) · [ROADMAP.md](ROADMAP.md)
 > · [CHANGELOG.md](CHANGELOG.md).
 
@@ -78,9 +82,9 @@ a Master/Child agent team against one repo.
 
 Omarchy-native workspace panel (`plugin/dev.pitwall`, Quickshell bar
 widget): collapsed flag-only button; header with refresh + settings;
-AI summary ticker; session rail newest-first with log-scaled duration
+AI brief ticker; session rail newest-first with log-scaled duration
 bars and R/S/U history segments; hover-highlight + click-pin detail
-cards; RESUME history rows.
+cards; RESUME history rows; Open Chat control.
 
 - **Project grouping, Pitwall-native.** Sessions are grouped by project
   (collapsed by default), ordered by semantic priority + recency.
@@ -110,6 +114,24 @@ cards; RESUME history rows.
   AI. Opening, hovering, or selecting never invokes AI. The context
   file (`/run/user/$UID/pitwall/`, 0700/0600, Drop-guard cleanup) is
   temporary — Pitwall does not record terminal conversations.
+- **AI brief ticker (complete text, one direction).** The brief area
+  renders the *whole* summary with eliding disabled — no truncation
+  marker, no filler, nothing clipped away. Motion is continuous
+  right-to-left only: each pass starts with the first character at the
+  right edge and runs until the last character is fully past the left
+  edge, then a fresh pass enters from the right again. Pass duration is
+  `(content width + viewport width) / 180 px per second`, taken from
+  measured geometry and never from the summary's character count, so a
+  long brief and a short one scroll at the same speed. Hovering the
+  brief surface or expanding it pauses the pass in place; it resumes
+  from the offset it was holding, and the offset survives the panel
+  tearing its content down and being reopened. A new summary abandons
+  the pass in flight and restarts from the right.
+- **Pitwall Chat (native terminal).** `pitwall chat` opens a real
+  terminal window and talks to you in it, about the workspace Pitwall
+  already observes. The panel's `Open Chat` control launches the same
+  command. Asking a question observes only; exactly one in-chat command
+  changes workspace state. See [Pitwall Chat](#pitwall-chat).
 - **Notifications (bounded inbox).** Sync-derived transitions only:
   session appeared / vanished / stopped, assign completion
   (completion) / failure (attention). Never per-process, per-tick, or
@@ -137,11 +159,166 @@ cards; RESUME history rows.
   AI. Always.
 
 CLI surface (all explicit, no daemons): `status [--json]`,
-`snapshot`, `checkpoint`, `resume`, `agents`, `models`, `summarize`,
-`assign`, `notifications`, `config`, `doctor`. Exit codes: 0 ok, 1
-operational failure, 2 usage error. `pitwall doctor` is a read-only
+`snapshot`, `checkpoint`, `resume`, `chat`, `agents`, `models`,
+`summarize`, `assign`, `notifications`, `config`, `doctor`. Exit codes:
+0 ok, 1 operational failure, 2 usage error. `pitwall doctor` is a read-only
 installation report: it checks the binary, data/config artifacts, plugin
 path, and optional user timer without creating state or enabling services.
+
+## Pitwall Chat
+
+```bash
+pitwall chat                        # about the whole workspace
+pitwall chat --session sess_<hex>   # scoped to one live session
+```
+
+A chat is a foreground conversation in a real terminal window. It has no
+daemon and no background process: the command *is* the chat, and the chat
+ends when you type `/exit` or close the window. Exit codes follow the rest
+of the CLI — **0** for a normal end, **1** for an operational failure,
+**2** for a usage error.
+
+Refusals are decided in a fixed order, and the usage group is decided
+first, so a malformed `--session` exits 2 even when the configured harness
+is also missing:
+
+1. the option parse — `chat` accepts only `--session`, and `--session`
+   with nothing after it is refused rather than treated as a
+   whole-workspace chat (exit 2);
+2. the `--session` shape, `sess_[0-9a-f]{16}` (exit 2);
+3. the configured model — empty means "the harness default", anything else
+   must pass the existing model validator (exit 2);
+4. the configured harness must be a known agent and installed here
+   (exit 1);
+5. a `--session` target must be currently live, and the chat's directory
+   (the scoped session's project → the most recently active observed
+   project → `$HOME`) must be absolute and must exist. A directory that
+   fails validation is named, never quietly swapped for the next candidate
+   (exit 1);
+6. a free chat number in `001..999` (exit 1).
+
+Nothing environmental is touched until the usage group has passed, and on
+every refusal path no terminal is opened, no harness is invoked, no context
+file is written, and no chat number is claimed.
+
+### Identity
+
+Each chat takes the lowest free number and sets its own window title with
+OSC 2:
+
+```text
+Pitwall Chat 001 · opencode · provider/model · pitwall
+```
+
+That title is what you see in the Omarchy window switcher. It is also half
+of how Pitwall recognises its own chat window: discovery needs **both** the
+reserved title grammar *and* a chat-number lease whose owner pid is a live
+`pitwall chat` process inside that window's process tree. Printing the
+title into some other terminal is not enough — a spoofed title alone never
+becomes a chat entry. Details and consequences:
+[ADR-009](docs/adr/ADR-009-chat-identity.md).
+
+Discovered chats appear in the panel as `pitwall-native` entries and
+disappear when their terminal closes. Nothing about a chat is persisted.
+
+### Configuration is captured once
+
+The harness and model are read from `~/.config/pitwall/config` exactly once,
+at startup, and are then immutable for the life of that chat — a later
+`pitwall config set` cannot reach a running chat. The next chat picks up the
+changed values. The header and the window title show what that chat actually
+holds.
+
+### Context
+
+Chat sees the workspace only through the same bounded, scrubbed
+`SummaryContext` that `pitwall summarize` uses — observed sessions, derived
+events, checkpoints, scrubbed notification facts. It gets no raw snapshot.
+
+Every turn stages that document as one pid-tagged `0600` file under
+`/run/user/$UID/pitwall/` (0700, tmpfs). It then reaches the harness either
+by path (opencode, via `-f`) or on the child's stdin (claude, codex) —
+**never in argv**, which is world-readable through `/proc`. The file is
+removed on success, refusal, spawn failure, non-zero exit, empty answer and
+timeout, and by a `Drop` guard on any path that does not reach the explicit
+cleanup.
+
+No conversation is stored. Turns live in the terminal and die with it;
+`/clear` clears the screen, not a record, because there is no record.
+
+### Asking is not acting
+
+Anything that does not start with `/` is a question. A question observes
+only: it is answered from the bounded context, no workspace action is
+derived from its wording, and phrasing it as an instruction does not make it
+one. The in-chat vocabulary is closed — these six entries and nothing else:
+
+| Command | Effect | Does |
+|---|---|---|
+| `/help` | read-only | list these commands |
+| `/context` | read-only | show the bounded context this chat can see |
+| `/sessions` | read-only | show the observed sessions in that context |
+| `/clear` | read-only | clear the conversation shown here (nothing was stored) |
+| `/resume [session-id]` | **CHANGES WORKSPACE STATE** | resume a session: focus its window, or open one terminal |
+| `/exit` | read-only | end this chat |
+
+`/resume` is the single command that changes workspace state, and the
+in-chat listing marks it that way. It runs the existing `resume` path with a
+fixed argument vector and no shell, and refuses malformed, non-live and
+non-resumable targets. `/exit` ends the chat but changes nothing in the
+workspace, so it is marked read-only alongside the informational entries.
+A `/`-prefixed word outside this list runs nothing and prints the list.
+
+### The panel control
+
+The expanded panel carries an `Open Chat` control. It runs the CLI with
+fixed argv and nothing else: `[pitwall, chat]`, or
+`[pitwall, chat, --session, <id>]` when a **live** session is pinned. A
+pinned resumable names a vanished session, so it cannot be a chat context —
+the control says so before you click, and an invalid session id refuses
+rather than quietly falling back to workspace context. Rendering, hovering
+or activating the control invokes no inference.
+
+### Terminal capabilities and limits
+
+- **Inline branding is decoration, never a prerequisite.** The chat header
+  probes the terminal's graphics protocol at runtime and shows the Pitwall
+  flag inline where it can. Where it cannot — no graphics protocol, a
+  missing asset, or a Sixel-only terminal, since Pitwall carries no Sixel
+  encoder — the header is textual and the chat is fully functional. Absence
+  is normal and is not reported as a problem.
+- **A chat started by hand inside a tmux pane is not discovered as a
+  chat.** Its process hangs off the tmux server rather than the window
+  client, and tmux owns the title, so neither identity signal holds. It
+  shows up as the ordinary terminal session it is. Chats that Pitwall
+  launches are direct children of the terminal, so this affects manual tmux
+  use only.
+- **Terminals are opened through Omarchy's terminal path, not a named
+  emulator.** One launch path (`xdg-terminal-exec`, fixed argv, no shell)
+  serves both `resume` and chat. Pitwall names no emulator, requires none,
+  and reads no emulator identity from the environment. One known argv
+  discrepancy in that path is documented in
+  [ADR-009](docs/adr/ADR-009-chat-identity.md) and deliberately preserved
+  so `resume`'s argv stays byte-identical.
+- **Abnormal termination can leave one temporary file.** A `SIGINT`
+  delivered while the harness is running may leave a single pid-tagged
+  `0600` context file in the runtime directory (tmpfs). The next chat
+  startup sweeps orphans whose owner is gone; logout clears the rest.
+  `/exit` and closing the window are clean paths.
+
+### Verification status
+
+Chat and the corrected ticker are implemented, with unit and property tests
+covering the deterministic parts (title grammar, number allocation,
+descriptor immutability, argv construction, input classification, privacy
+scrubbing, state round trip). **Nothing here has been observed on an
+Omarchy runtime.** The work was written on macOS with no Rust toolchain and
+no QML tooling, so it has not been compiled and no test has been executed.
+Still to confirm on target: the terminal abstraction's command
+pass-through, the window title in the switcher, chat discovery in the panel,
+the header's inline and textual forms, concurrent chats `001`/`002`/`003`,
+and codex's stdin delivery. Treat every runtime claim in this section as
+designed behaviour pending that check.
 
 ## UI mental model
 
@@ -207,8 +384,10 @@ default. Workspace data stays on-device in SQLite.
 AI context is sanitized, bounded, and ephemeral. Pitwall does not
 persist terminal transcripts, full argv, environment variables,
 credentials, or secrets — enforced by unit tests (secret-bearing
-fixtures never reach DB bytes or `state.json`). See
-[SECURITY.md](SECURITY.md).
+fixtures never reach DB bytes or `state.json`). Chat holds the same
+line: it reads the workspace only through the bounded `SummaryContext`,
+its document never travels in argv, and no conversation is stored
+anywhere — turns die with the terminal. See [SECURITY.md](SECURITY.md).
 
 ## What Pitwall is not
 
@@ -234,23 +413,24 @@ Next vs future are tracked outside this file:
 - [docs/AI_WORKFORCE.md](docs/AI_WORKFORCE.md) — workforce direction
 - [docs/RECIPES.md](docs/RECIPES.md) — recipe direction
 
-Future directions (planned, not built): contextual "Ask Pitwall"
-interaction, context-window monitoring and handover, project/recipe
-bootstrap, agent communication channels, multi-node Pitwall,
-temporary remote summary sharing.
+Future directions (planned, not built): context-window monitoring and
+handover, project/recipe bootstrap, agent communication channels,
+multi-node Pitwall, temporary remote summary sharing.
 
-M7 currently hardens summary freshness and rotates bounded summary sentences
-in the ticker. Interactive Pitwall Chat and external communication channels
-are not implemented; the configured agent runner remains an explicit,
-foreground summary operation. Summary generation now passes through one
+M7 hardened summary freshness and passed summary generation through one
 bounded `SummaryContext` containing observed sessions, derived events,
 checkpoints, and scrubbed notification facts; terminal text remains confined
-to the existing ephemeral summary document path.
+to the existing ephemeral document path. The panel presents that
+interpretation as a compact `AI BRIEF`, kept visually subordinate to Pitwall
+identity and workspace groups.
 
-The panel presents that interpretation as a compact `AI BRIEF`, keeping the
-brief visually subordinate to Pitwall identity and workspace groups. A chat
-control is intentionally absent until a real interactive execution path is
-available.
+M8 builds on that context in two places: the AI brief ticker now scrolls the
+complete brief in one direction from measured geometry, and `pitwall chat`
+turns the same bounded context into an interactive, observe-only
+conversation in a native terminal — with a panel `Open Chat` control and one
+explicitly entered command that may change workspace state. External
+communication channels are still not implemented. M8 has not been verified
+on an Omarchy runtime; see [Pitwall Chat](#pitwall-chat).
 
 ## Branding
 

@@ -36,6 +36,31 @@ all detection lives in the Rust daemon/CLI, never in QML.
   (`hyprctl dispatch` is unusable from shell widgets in this environment —
   its Lua shorthand rejects multi-token calls; native activation is also
   the first-party mechanism.)
+- AI brief ticker: renders the **complete** brief with `elide:
+  Text.ElideNone` — no truncation marker, no filler, nothing clipped.
+  Motion is right-to-left only; a pass starts with the first character at
+  the viewport's right edge (`x = viewport.width`) and animates to
+  `-marqueeText.implicitWidth`, so the last character clears the left edge
+  before `onFinished` starts a fresh pass from the right. Duration is
+  `(x + contentWidth) / 180 px per second` from measured geometry
+  (`tickerDurationMs`), never from character count, and there is no lower
+  clamp — a floor would make short briefs crawl. Linear easing. The pass
+  offset lives on `root`, not on the track, so a panel content teardown
+  while paused does not lose progress; pause is the animation's own
+  `paused` state (closed panel, expanded brief, or hover over the whole
+  brief surface), so resuming continues from the held offset instead of
+  restarting. A changed summary abandons the pass in flight and restarts
+  from the right; an empty brief hides the viewport and stops the
+  animation. The pass-progress underline is a width *binding* on the
+  ticker's own `x`, not a second animation, so the ≤2 concurrent budget
+  above is untouched.
+- Open Chat control: `Open Chat` runs the CLI with fixed argv only —
+  `[pitwall, "chat"]`, or `[pitwall, "chat", "--session", <sess id>]` when
+  a **live** session is pinned. A pinned resumable is a vanished session
+  and cannot be a chat context; an invalid session id refuses instead of
+  silently falling back to workspace context. The hint line states which
+  of the two will happen before the click. Rendering, hovering or
+  activating it invokes no inference and no model call.
 - Glyphs: no codepoint enters the plugin until it is verified present in the
   installed font (`fc-query` charset) or already proven by the shipped,
   screenshot-verified panel. Current coverage — Nerd PUA: U+F013 gear,
@@ -79,6 +104,27 @@ at 16px via pixel dump (pure 2px cells, no blending).
   fixed-form `pitwall resume --session-id <id>` (validated
   `sess_[0-9a-f]{16}`, exit-visible `Process`, no shell). Never starts
   an agent; refusals warn and leave the panel stable.
+- Chat entries (M8): chat sessions arrive in `state.json` as ordinary
+  sessions carrying an additive `chat` object. They are held out of the
+  tier walk and appended as one `Chat Sessions` group *after* every
+  agent/workspace group — their tier is `pitwall-native`, which would
+  otherwise place them first, the opposite of the intended prominence — and
+  the whole region renders one weight step down (`caption: true`). Same
+  single-row bar form as every other entry, carrying the literal `Pitwall
+  Chat`, the number, harness, model (or the resolved agent-default label)
+  and context label, closed by the observed state word. Focus is the only
+  action offered, and activity comes from `state.json` alone. No entries,
+  no header: the region is absent when no session carries chat fields. A
+  malformed `chat` value degrades that entry to an ordinary session rather
+  than breaking the panel. The Rust core decides what is a chat (title
+  grammar plus a corroborating process-tree lease — see
+  `docs/adr/ADR-009-chat-identity.md`); QML never infers it.
+- M8 verification status: the ticker correction, the chat region and the
+  Open Chat control were written without QML tooling — no `qmllint`, no
+  `qmltestrunner`, and no live shell — so **nothing in M8 has been
+  screenshot-verified or run**. The hot-reload caveat below applies in
+  full: restart the shell and screenshot-verify before trusting any of
+  it. Behaviour described above is the code's intent, not an observation.
 
 ## Dev workflow
 

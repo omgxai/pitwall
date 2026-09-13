@@ -6,6 +6,47 @@ All notable changes to Pitwall are documented here. Format follows
 
 ## [Unreleased]
 
+> M8 below is implemented but **not verified on an Omarchy runtime**: it was
+> written without a Rust toolchain and without QML tooling, so it has not been
+> compiled, no test has been executed, and no chat window has been opened.
+> Verification gates are listed in `README.md` under "Pitwall Chat".
+
+- M8 Pitwall Chat: `pitwall chat [--session sess_ID]` runs a foreground
+  conversation in a native terminal — no daemon, no background process. Chat
+  identity is a sequential number `001..999` plus a reserved OSC 2 window
+  title; discovery requires that title *and* a chat-number lease whose owner
+  pid is a live `pitwall chat` process in the window's tree, so a spoofed
+  title alone is never a chat. Harness and model are captured once at startup
+  and are immutable for the chat's life. Context comes only from the bounded
+  `SummaryContext`; the document travels by `0600` ephemeral file (opencode)
+  or on stdin (claude, codex), never in argv, and no conversation is stored.
+  Exit codes 0/1/2 with a fixed refusal order that decides usage errors before
+  touching anything environmental. New: `docs/adr/ADR-009-chat-identity.md`.
+- M8 asking vs acting: every input that is not one of the six in-chat commands
+  is a question, answered from the bounded context with no workspace action
+  derived from its wording. The in-chat listing marks `/help`, `/context`,
+  `/sessions`, `/clear` and `/exit` read-only and `/resume [session-id]` as
+  changing workspace state — the one command that acts, through the existing
+  `resume` path with fixed argv and no shell.
+- M8 panel: `Open Chat` control (fixed argv, live-session scoping, refusal
+  instead of silent fallback) and a `pitwall-native` chat region that appears
+  while a chat terminal is open and disappears when it closes. `state.json`
+  gains an additive `chat` object per session (number, harness, model, context
+  label, start epoch — no pid, window address or conversation text).
+- M8 ticker correction: the AI brief now renders the complete summary with
+  eliding disabled and no truncation marker, scrolls right-to-left only, runs
+  each pass from the right edge to fully past the left edge before starting a
+  fresh pass, derives duration from measured geometry
+  (`(content + viewport) / 180 px per second`) rather than character count,
+  and pauses in place on hover or expansion — resuming from the held offset
+  across a panel content teardown.
+- M8 documented limitations: inline chat branding depends on the terminal's
+  graphics protocol and falls back to a textual header (chat stays fully
+  functional); a `pitwall chat` started by hand inside a tmux pane is not
+  discovered as a chat and appears as the ordinary terminal session it is; the
+  single terminal launch path keeps its existing `--dir` argv shape so
+  `resume`'s argv stays byte-identical, with the suspected upstream mismatch
+  recorded in ADR-009 rather than silently changed.
 - M7 summary freshness hardening: snapshot now compares the cached summary's
   exact structured input hash before exposing it. Changed workspaces surface
   an explicit stale state with no old summary text.
@@ -15,7 +56,7 @@ All notable changes to Pitwall are documented here. Format follows
   notification-read confirmation.
 - M7 visual pass: labeled the summary surface as `AI BRIEF`, added a compact
   subdued palette-bound brief surface, and kept the session rail visually
-  primary. No chat affordance is shown while Chat remains deferred.
+  primary. (No chat affordance was shown at M7; M8 above adds one.)
 - M7 ticker correction: the brief now uses the complete measured summary
   text in a right-to-left marquee at 180 px/sec, pausing in place on hover or
   expansion and restarting only when the summary changes.
@@ -23,7 +64,7 @@ All notable changes to Pitwall are documented here. Format follows
   the activity rail was thinned to read as state history, not completion.
 - M7 `SummaryContext`: one deterministic, bounded, scrubbed structured
   context now feeds summary hashing and future workspace-aware surfaces.
-  Interactive Chat remains deferred pending a safe question execution path.
+  (M8 above is the first surface built on it.)
 
 ## [0.1.0] - 2026-09-13
 
