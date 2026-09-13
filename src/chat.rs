@@ -4638,8 +4638,14 @@ mod responder_tests {
             &chat_message(&question("what is running?")),
         )
         .unwrap();
+        // The canary is the document's structural JSON prefix, not the bare
+        // `sessions` field name. `CHAT_INSTRUCTION` legitimately names that
+        // field when it tells the harness how to read the context, so a
+        // bare-name needle would read that prose as leaked context. This
+        // prefix is `render_document`'s own opening literal and cannot occur
+        // in prose, while still matching wherever the document itself does.
         assert!(
-            !call.argv().iter().any(|a| a.contains("\"sessions\"")),
+            !call.argv().iter().any(|a| a.contains("{\"sessions\":[")),
             "{:?}",
             call.argv()
         );
