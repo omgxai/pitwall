@@ -15,6 +15,9 @@ All notable changes to Pitwall are documented here. Format follows
   in the shell log.
 
 ### Added
+- M6 user-local packaging: idempotent `packaging/install.sh`, explicit
+  timer/plugin opt-ins, data-preserving uninstall, and
+  `packaging/test-install.sh` clean-room verification.
 - M5g notification inbox (frozen): `notifications` table (schema v4,
   closed vocab, dedup, 100-cap, pinned columns), sync-derived
   appeared/vanished/stopped + assign completion/attention events,

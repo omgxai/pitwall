@@ -229,17 +229,40 @@ temporary remote summary sharing.
 
 ## Install
 
-No installer yet — it arrives with M6 packaging. `packaging/install.sh`
-is a stub that says so (verified). The shipped user units are optional and
-disabled by default; enable them only after installing the binary and units.
-Target flow:
+The supported development-stage install is user-local and does not require
+root. From a Pitwall checkout:
 
 ```bash
 git clone <repo-url> ~/Projects/pitwall
 cd ~/Projects/pitwall
 ./packaging/install.sh
+```
+
+The installer builds a release binary at `~/.local/bin/pitwall`, installs the
+Omarchy plugin at `~/.config/omarchy/plugins/dev.pitwall`, and installs the
+optional user units at `~/.config/systemd/user/`. It is safe to run again.
+The timer is installed but disabled by default. To enable live 30-second
+snapshots:
+
+```bash
+systemctl --user enable --now pitwall-snapshot.timer
 omarchy plugin enable dev.pitwall --after omarchy.agents
 ```
+
+Run `pitwall snapshot` once to initialize the first state artifact, or let the
+timer do it. Runtime data is stored under
+`${XDG_DATA_HOME:-~/.local/share}/pitwall/` and includes the SQLite continuity
+database and `state.json`; the installer never deletes that data. To remove
+application files while preserving history:
+
+```bash
+./packaging/install.sh --uninstall
+```
+
+Uninstall disables the Pitwall user timer, removes the binary, plugin, and
+units, and leaves user data intact. If the plugin directory was not installed
+by Pitwall, it is left untouched. The clean-room smoke test is
+`packaging/test-install.sh` after `cargo build --release`.
 
 ## Develop
 

@@ -4,7 +4,8 @@ Documentation=https://github.com/omgxai/pitwall
 # M2: persistence invocation path. Conservative by design: this is a
 # oneshot unit, NOT a resident daemon. Pair with pitwall-snapshot.timer
 # (every 30 seconds) or invoke manually via `pitwall snapshot`.
-# NOT enabled by default in M2; enablement arrives with M3+ packaging.
+# Installed as a user unit by packaging/install.sh; still disabled unless the
+# user explicitly enables the paired timer.
 After=graphical-session.target
 
 [Service]

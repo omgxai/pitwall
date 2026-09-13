@@ -85,5 +85,7 @@ These are architected-for (see ADRs), not built.
 
 ## Later
 
-- **M6 — Packaging + first public release**: `install.sh`, docs pass,
-  clean-room install verified, v0.1.0 tag.
+- **M6 — Packaging + first public release**: user-local `install.sh`,
+  optional systemd timer, plugin installation, data-preserving uninstall, and
+  clean-room smoke test are implemented. Remaining M6 work is clean-room
+  install verification on a freshly provisioned Omarchy and the v0.1.0 tag.
