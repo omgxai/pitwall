@@ -2484,7 +2484,15 @@ mod tests {
             prop_assert_eq!(
                 outcome.clone(),
                 expected.clone(),
-                "args={args:?} model_kind={model_kind} harness_kind={harness_kind} installed={installed}"
+                // Explicit positional arguments, not captured identifiers:
+                // `prop_assert_eq!` builds its format string with `concat!`,
+                // and `format_args!` cannot capture from the surrounding
+                // scope when the format string comes from a macro expansion.
+                "args={:?} model_kind={} harness_kind={} installed={}",
+                args,
+                model_kind,
+                harness_kind,
+                installed
             );
 
             // ---- (2) the class of that outcome (23.2) --------------------

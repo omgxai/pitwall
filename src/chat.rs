@@ -697,7 +697,9 @@ fn secure_runtime_dir(dir: &std::path::Path) -> Result<(), String> {
 /// guard can only ever remove the file it created.
 ///
 /// Not `Clone` and not `Copy` on purpose: two values must never claim the
-/// authority to unlink one lease.
+/// authority to unlink one lease. `Debug` only, so the allocator's
+/// `Result<ChatNumberLease, _>` can be unwrapped in tests.
+#[derive(Debug)]
 pub struct ChatNumberLease {
     number: u16,
     /// `Some` while the lease file is ours to remove; `None` afterwards.
@@ -7649,7 +7651,16 @@ mod property_tests {
             prop_assert_eq!(blocks.len(), scope_ids.len().min(crate::context::MAX_SESSIONS));
             prop_assert_eq!(truncated, scope_ids.len() - blocks.len());
             prop_assert_eq!(truncated > 0, scope_ids.len() > blocks.len());
-            prop_assert!(document.contains(&format!("\"truncated_sessions\":{truncated}")));
+            // Bound to a local and asserted with an explicit message: a
+            // single-argument `prop_assert!` turns `stringify!` of the
+            // expression into its format string, and a `{...}` inside that
+            // expression would then be read as a placeholder.
+            let truncated_field = format!("\"truncated_sessions\":{truncated}");
+            prop_assert!(
+                document.contains(&truncated_field),
+                "the document must report {}",
+                truncated_field
+            );
 
             for block in &blocks {
                 let id = json_string_of(block, "id").expect("every block names its session");
@@ -7843,11 +7854,21 @@ mod property_tests {
             }
             // Unbounded scrollback: the middle of the buffer is not there.
             for i in 10..30 {
-                prop_assert!(!document.contains(&format!("middle-{marker}-{i}")));
+                let middle = format!("middle-{marker}-{i}");
+                prop_assert!(
+                    !document.contains(&middle),
+                    "scrollback line {} reached the transmitted document",
+                    middle
+                );
             }
             // A secret inside an otherwise-safe field is redacted, not dropped
             // silently: the line is still there, its secret is not.
-            prop_assert!(document.contains(&format!("kept-{marker}-2")));
+            let kept = format!("kept-{marker}-2");
+            prop_assert!(
+                document.contains(&kept),
+                "the scrubbed line must survive; {} is missing",
+                kept
+            );
             prop_assert!(document.contains("[redacted]"), "{document}");
 
             // ---- the chat fields of state.json (22.7) ----
@@ -7940,7 +7961,12 @@ mod property_tests {
                     excluded
                 );
             }
-            prop_assert!(!presented.contains(&format!("middle-{marker}-15")));
+            let middle = format!("middle-{marker}-15");
+            prop_assert!(
+                !presented.contains(&middle),
+                "scrollback line {} reached a presented line",
+                middle
+            );
         }
     }
 
