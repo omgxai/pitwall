@@ -749,6 +749,16 @@ Panel {
                   font.pixelSize: Style.font.caption
                   renderType: Text.NativeRendering
                 }
+
+                Text {
+                  visible: !!root.summary && root.summary.status === "stale" && !root.generating
+                  textFormat: Text.PlainText
+                  text: "Outdated - generate a fresh summary"
+                  color: Color.urgent
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  renderType: Text.NativeRendering
+                }
               }
             }
 

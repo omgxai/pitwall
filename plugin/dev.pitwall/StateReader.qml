@@ -40,7 +40,7 @@ Item {
     var s = record ? record.summary : null
     if (!s || typeof s !== "object" || Array.isArray(s)) return null
     var status = String(s.status || "")
-    if (status !== "ready" && status !== "error" && status !== "unavailable") return null
+    if (status !== "ready" && status !== "error" && status !== "unavailable" && status !== "stale") return null
     return {
       text: String(s.text || ""),
       model: s.model ? String(s.model) : "",

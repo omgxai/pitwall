@@ -13,6 +13,7 @@ use pitwall_lib::collector;
 use pitwall_lib::output;
 use pitwall_lib::platform::Platform;
 use pitwall_lib::store;
+use pitwall_lib::summary as summary_mod;
 
 fn print_help() {
     println!(
@@ -289,6 +290,8 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
 
     let snapshot = collector::collect(&platform());
     let mut resumable: Vec<store::Checkpoint> = Vec::new();
+    let mut summary_events = Vec::new();
+    let mut summary_checkpoints: Vec<store::Checkpoint> = Vec::new();
     let mut last_summary: Option<output::StateSummary> = None;
     let mut meta: std::collections::HashMap<String, output::SessionMeta> =
         std::collections::HashMap::new();
@@ -298,12 +301,15 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
         Ok(mut s) => {
             // Previous observation for notification diffing (degradable:
             // absent on first run; staleness harmless).
-            let prev_sessions: Vec<store::PrevSession> = s
-                .latest_observation()
-                .ok()
-                .flatten()
-                .and_then(|(id, _)| s.observation_sessions(id).ok())
+            let previous = s.latest_observation().ok().flatten();
+            let prev_sessions: Vec<store::PrevSession> = previous
+                .map(|(id, _)| s.observation_sessions(id).ok().unwrap_or_default())
                 .unwrap_or_default();
+            if let Some((_, collected_at)) = previous {
+                let recent = s.checkpoints_since(collected_at, 20).unwrap_or_default();
+                summary_events =
+                    pitwall_lib::context::derive_events(&prev_sessions, &snapshot, &recent, 20);
+            }
             if s.recovered_from_corrupt {
                 eprintln!(
                     "pitwall snapshot: warning: corrupt database was quarantined and recreated"
@@ -363,17 +369,33 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
                     eprintln!("pitwall snapshot: warning: checkpoint read failed ({e})");
                 }
             }
+            if let Ok(all) = s.latest_checkpoints(50) {
+                let mut seen = std::collections::HashSet::new();
+                summary_checkpoints = all
+                    .into_iter()
+                    .filter(|cp| seen.insert(cp.project_id.clone()))
+                    .take(10)
+                    .collect();
+            }
             // Timeline enrichment + last cached summary (degradable).
             meta = session_meta_map(&s, &snapshot);
-            // Last cached summary for state.json v3 (degradable: absent).
+            // Only expose a cached summary when its exact structured input is
+            // still current. Otherwise mark it stale instead of presenting an
+            // old sentence as though it described this workspace.
+            let current_summary_hash =
+                summary_mod::input_hash(&snapshot, &summary_events, &summary_checkpoints);
             match s.latest_summary() {
                 Ok(Some(row)) => {
-                    last_summary = Some(output::StateSummary::ready(
-                        row.text,
-                        row.model,
-                        row.created_at,
-                        row.input_hash,
-                    ));
+                    last_summary = Some(if row.input_hash == current_summary_hash {
+                        output::StateSummary::ready(
+                            row.text,
+                            row.model,
+                            row.created_at,
+                            row.input_hash,
+                        )
+                    } else {
+                        output::StateSummary::stale(row.input_hash, row.model, row.created_at)
+                    });
                 }
                 Ok(None) => {}
                 Err(e) => {

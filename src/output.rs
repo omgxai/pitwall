@@ -190,6 +190,7 @@ pub mod summary_status {
     pub const READY: &str = "ready";
     pub const ERROR: &str = "error";
     pub const UNAVAILABLE: &str = "unavailable";
+    pub const STALE: &str = "stale";
 }
 
 /// A persistable-ready AI summary for state.json. Only final text plus
@@ -229,6 +230,17 @@ impl StateSummary {
             input_hash: String::new(),
             status: summary_status::ERROR,
             message: Some(message.to_string()),
+        }
+    }
+
+    pub fn stale(input_hash: String, model: Option<String>, created_at: i64) -> StateSummary {
+        StateSummary {
+            text: String::new(),
+            model,
+            created_at,
+            input_hash,
+            status: summary_status::STALE,
+            message: Some("workspace changed; generate a fresh summary".to_string()),
         }
     }
 }
@@ -585,6 +597,24 @@ mod tests {
         );
         assert!(state.contains("\"status\":\"error\""), "{state}");
         assert!(state.contains("\"message\":\"timeout\""), "{state}");
+        assert!(state.contains("\"text\":\"\""), "{state}");
+    }
+
+    #[test]
+    fn state_v3_marks_changed_workspace_summary_stale() {
+        let snap = sample_snapshot();
+        let sum = StateSummary::stale("fnv:old".to_string(), None, 42);
+        let state = snapshot_to_state_json(
+            &snap,
+            &[],
+            Some(&sum),
+            &HashMap::new(),
+            &ConfigEcho::default(),
+            &[],
+            0,
+        );
+        assert!(state.contains("\"status\":\"stale\""), "{state}");
+        assert!(state.contains("workspace changed"), "{state}");
         assert!(state.contains("\"text\":\"\""), "{state}");
     }
 
