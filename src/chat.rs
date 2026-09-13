@@ -284,7 +284,10 @@ pub fn title_context_label(d: &ChatDescriptor) -> String {
     let head = compose_title(&d.number_text(), d.harness(), d.model_label(), "");
     let room = MAX_CHAT_TITLE_CHARS.saturating_sub(head.chars().count());
     let budget = room.clamp(1, MAX_CONTEXT_LABEL_CHARS);
-    debug_assert!(room >= 39, "title head grew beyond the documented worst case");
+    debug_assert!(
+        room >= 39,
+        "title head grew beyond the documented worst case"
+    );
     truncate_chars(d.context_label(), budget)
 }
 
@@ -1241,7 +1244,9 @@ pub fn classify(line: &str) -> ChatInput {
         ("/resume", [target]) => ChatInput::Act(ActionCommand::Resume {
             target: Some(resume_target_text(target)),
         }),
-        _ => ChatInput::Unknown { entered: unknown_command_text(word) },
+        _ => ChatInput::Unknown {
+            entered: unknown_command_text(word),
+        },
     }
 }
 
@@ -1272,7 +1277,9 @@ fn classify_question(trimmed: &str) -> ChatInput {
     let scrubbed = crate::context::scrub_string(&clean);
     let scrubbed_chars = scrubbed.chars().count();
     if scrubbed_chars > MAX_CHAT_QUESTION_CHARS {
-        return ChatInput::QuestionTooLong { chars: scrubbed_chars };
+        return ChatInput::QuestionTooLong {
+            chars: scrubbed_chars,
+        };
     }
     ChatInput::Question(ChatQuestion { text: scrubbed })
 }
@@ -1639,7 +1646,10 @@ pub fn scope_to_context(
     let scoped = project_id.as_deref();
 
     snapshot.sessions.retain(|s| {
-        s.id == session_id || s.project.as_ref().is_some_and(|p| same_project(scoped, &p.id))
+        s.id == session_id
+            || s.project
+                .as_ref()
+                .is_some_and(|p| same_project(scoped, &p.id))
     });
     prev.retain(|p| {
         // `PrevSession::project_id` is optional (a session observed without a
@@ -1784,7 +1794,9 @@ fn read_store_facts(data_dir: &std::path::Path) -> StoreFacts {
     let (prev, recent) = (|| {
         let (obs_id, collected_at) = store.latest_observation().ok()??;
         let prev = store.observation_sessions(obs_id).ok()?;
-        let recent = store.checkpoints_since(collected_at, MAX_CHAT_EVENTS as i64).ok()?;
+        let recent = store
+            .checkpoints_since(collected_at, MAX_CHAT_EVENTS as i64)
+            .ok()?;
         Some((prev, recent))
     })()
     .unwrap_or((Vec::new(), Vec::new()));
@@ -2085,7 +2097,9 @@ fn classify_run_failure(error: &str, timeout: std::time::Duration) -> ChatError 
 /// [`ChatError::NoAnswer`] (13.5).
 pub fn present_answer(text: &str) -> String {
     let clean = crate::context::strip_controls(text);
-    crate::context::scrub_string(clean.trim()).trim().to_string()
+    crate::context::scrub_string(clean.trim())
+        .trim()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -2585,8 +2599,7 @@ pub fn plan_branding(
 /// Base64, standard alphabet with padding. Small, exact, dependency-free —
 /// the graphics protocol requires its payloads base64-encoded.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = u32::from(chunk[0]);
@@ -3330,7 +3343,13 @@ mod tests {
         let dir = sandbox();
         let path = dir.to_string_lossy().into_owned();
         let cases = [
-            (7u16, "opencode", "prov/model", "Work", Some("sess_0123456789abcdef")),
+            (
+                7u16,
+                "opencode",
+                "prov/model",
+                "Work",
+                Some("sess_0123456789abcdef"),
+            ),
             (1, "claude", "", "Workspace", None),
             (999, "codex", "a/b-c_d.e:f", "two words", None),
             // A label that is only spaces is still a label capture accepts;
@@ -3445,7 +3464,10 @@ mod tests {
     fn parse_title_accepts_every_known_harness() {
         let sep = TITLE_SEPARATOR;
         for a in crate::agents::KNOWN {
-            let t = format!("Pitwall Chat 123{sep}{}{sep}agent default{sep}Workspace", a.id);
+            let t = format!(
+                "Pitwall Chat 123{sep}{}{sep}agent default{sep}Workspace",
+                a.id
+            );
             let parsed = parse_title(&t).expect("known harness must parse");
             assert_eq!(parsed.harness(), a.id);
             assert_eq!(parsed.model(), "");
@@ -3491,7 +3513,12 @@ mod tests {
     #[test]
     fn sanitised_labels_satisfy_every_label_rule() {
         let long = "z".repeat(100);
-        for raw in ["  my   project  ", "line1\nline2", "a\u{00B7}b", long.as_str()] {
+        for raw in [
+            "  my   project  ",
+            "line1\nline2",
+            "a\u{00B7}b",
+            long.as_str(),
+        ] {
             let label = sanitize_context_label(raw);
             assert!(!label.is_empty());
             assert!(label.chars().count() <= MAX_CONTEXT_LABEL_CHARS);
@@ -3798,7 +3825,14 @@ mod tests {
     #[test]
     fn the_vocabulary_is_the_documented_six_entries() {
         let names: Vec<&str> = VOCABULARY.iter().map(|e| e.name).collect();
-        let want = ["/help", "/context", "/sessions", "/clear", "/resume", "/exit"];
+        let want = [
+            "/help",
+            "/context",
+            "/sessions",
+            "/clear",
+            "/resume",
+            "/exit",
+        ];
         assert_eq!(names, want);
         // Exactly one entry may change workspace state (26.1).
         let acting: Vec<&str> = VOCABULARY
@@ -3824,7 +3858,10 @@ mod tests {
     fn every_vocabulary_entry_classifies_to_its_own_variant() {
         assert_eq!(classify("/help"), ChatInput::Info(InfoCommand::Help));
         assert_eq!(classify("/context"), ChatInput::Info(InfoCommand::Context));
-        assert_eq!(classify("/sessions"), ChatInput::Info(InfoCommand::Sessions));
+        assert_eq!(
+            classify("/sessions"),
+            ChatInput::Info(InfoCommand::Sessions)
+        );
         assert_eq!(classify("/clear"), ChatInput::Info(InfoCommand::Clear));
         assert_eq!(classify("/exit"), ChatInput::End);
         let no_target = ChatInput::Act(ActionCommand::Resume { target: None });
@@ -3879,7 +3916,9 @@ mod tests {
             "-rf",
             "/etc/passwd",
         ] {
-            let carried = ChatInput::Act(ActionCommand::Resume { target: Some(raw.to_string()) });
+            let carried = ChatInput::Act(ActionCommand::Resume {
+                target: Some(raw.to_string()),
+            });
             assert_eq!(classify(&format!("/resume {raw}")), carried, "{raw:?}");
         }
         // Control characters are stripped for safe printing; that cannot turn
@@ -3969,15 +4008,27 @@ mod tests {
     #[test]
     fn anything_not_starting_with_a_slash_is_a_question() {
         // Ordinary questions.
-        assert_eq!(question_text("what is child1 doing?"), "what is child1 doing?");
+        assert_eq!(
+            question_text("what is child1 doing?"),
+            "what is child1 doing?"
+        );
         // A question that talks *about* a command is still a question: wording
         // never becomes behaviour (27.3).
-        assert_eq!(question_text("should I /resume child1?"), "should I /resume child1?");
+        assert_eq!(
+            question_text("should I /resume child1?"),
+            "should I /resume child1?"
+        );
         assert_eq!(question_text("resume child1"), "resume child1");
         assert_eq!(question_text("exit"), "exit");
         // Slashes mid-text: paths and dates are not commands.
-        assert_eq!(question_text("does src/main.rs matter?"), "does src/main.rs matter?");
-        assert_eq!(question_text("what changed on 12/03?"), "what changed on 12/03?");
+        assert_eq!(
+            question_text("does src/main.rs matter?"),
+            "does src/main.rs matter?"
+        );
+        assert_eq!(
+            question_text("what changed on 12/03?"),
+            "what changed on 12/03?"
+        );
         // A line whose slash is hidden behind a control character is a
         // question, because the prefix test runs before control stripping.
         assert_eq!(question_text("\u{1b}/exit"), "/exit");
@@ -3986,7 +4037,10 @@ mod tests {
             "/resume sess_0123456789abcdef"
         );
         // Leading whitespace does not change the class.
-        assert_eq!(question_text("   how busy is the workspace?  "), "how busy is the workspace?");
+        assert_eq!(
+            question_text("   how busy is the workspace?  "),
+            "how busy is the workspace?"
+        );
         // Only a question reaches the harness, and it changes nothing.
         let q = classify("what is child1 doing?");
         assert!(q.invokes_harness());
@@ -3996,7 +4050,15 @@ mod tests {
 
     #[test]
     fn blank_and_control_only_input_is_a_skipped_no_op() {
-        for line in ["", " ", "   \t ", "\n", "\r\n", "\u{007f}", "\u{1b}\u{0007}"] {
+        for line in [
+            "",
+            " ",
+            "   \t ",
+            "\n",
+            "\r\n",
+            "\u{007f}",
+            "\u{1b}\u{0007}",
+        ] {
             let input = classify(line);
             assert_eq!(input, ChatInput::Blank, "{line:?} must be a no-op");
             assert!(!input.changes_workspace_state());
@@ -4038,7 +4100,9 @@ mod tests {
 
         // One character over refuses, naming the length that was entered —
         // following `assign`'s precedent, because truncating changes meaning.
-        let over = ChatInput::QuestionTooLong { chars: MAX_CHAT_QUESTION_CHARS + 1 };
+        let over = ChatInput::QuestionTooLong {
+            chars: MAX_CHAT_QUESTION_CHARS + 1,
+        };
         assert_eq!(classify(&"a".repeat(MAX_CHAT_QUESTION_CHARS + 1)), over);
         // Counted in characters, not bytes: a 2000-character multi-byte
         // question is 4000 bytes and still accepted.
@@ -4139,7 +4203,10 @@ mod tests {
             .lines()
             .find(|l| l.trim_start().starts_with("/resume"))
             .expect("the acting entry is listed");
-        assert!(resume_line.contains("CHANGES WORKSPACE STATE"), "{resume_line}");
+        assert!(
+            resume_line.contains("CHANGES WORKSPACE STATE"),
+            "{resume_line}"
+        );
         assert!(!resume_line.contains("read-only"), "{resume_line}");
         // The listing also states what a non-command input does (27.5).
         assert!(listing.contains("question"), "{listing}");
@@ -4306,7 +4373,9 @@ mod tests {
         std::fs::write(&asset, png_head_256()).unwrap();
 
         let planned = plan_branding(KITTY, Some(asset.as_path()));
-        let inline = Branding::Inline { path: asset.clone() };
+        let inline = Branding::Inline {
+            path: asset.clone(),
+        };
         assert_eq!(planned, inline);
 
         // The image is the escape sequence for that exact file plus one
@@ -4509,14 +4578,22 @@ mod responder_tests {
         // claude: -p <MSG>, document on stdin, context path nowhere.
         let cl = descriptor("claude", "prov/model", &dir);
         let call = build_chat_call(&cl, bin, ctx, &msg).unwrap();
-        let want = vec!["/opt/bin/harness".to_string(), "-p".to_string(), msg.clone()];
+        let want = vec![
+            "/opt/bin/harness".to_string(),
+            "-p".to_string(),
+            msg.clone(),
+        ];
         assert_eq!(call.argv().to_vec(), want);
         assert!(call.context_on_stdin());
 
         // codex: exec <MSG>, same rules.
         let cx = descriptor("codex", "", &dir);
         let call = build_chat_call(&cx, bin, ctx, &msg).unwrap();
-        let want = vec!["/opt/bin/harness".to_string(), "exec".to_string(), msg.clone()];
+        let want = vec![
+            "/opt/bin/harness".to_string(),
+            "exec".to_string(),
+            msg.clone(),
+        ];
         assert_eq!(call.argv().to_vec(), want);
         assert!(call.context_on_stdin());
 
@@ -4551,7 +4628,11 @@ mod responder_tests {
         for harness in ["opencode", "claude", "codex"] {
             let d = descriptor(harness, "", &dir);
             let call = build_chat_call(&d, bin, ctx, &msg).unwrap();
-            let carrying = call.argv().iter().filter(|a| a.contains("rm -rf ~")).count();
+            let carrying = call
+                .argv()
+                .iter()
+                .filter(|a| a.contains("rm -rf ~"))
+                .count();
             assert_eq!(carrying, 1, "{harness}: {:?}", call.argv());
             // And that one element is the message, in its trailing position.
             assert_eq!(call.argv().last().unwrap(), &msg);
@@ -4603,7 +4684,11 @@ mod responder_tests {
         assert!(!answer.contains('\u{1b}'), "{answer:?}");
         assert!(!answer.contains('\u{7}'), "{answer:?}");
         // 12.8 / 15.7: the staged context is gone.
-        assert!(staged_contexts(&runtime).is_empty(), "{:?}", staged_contexts(&runtime));
+        assert!(
+            staged_contexts(&runtime).is_empty(),
+            "{:?}",
+            staged_contexts(&runtime)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5287,9 +5372,9 @@ mod resume_tests {
 
         for entered in [
             "not-a-session",
-            "sess_0123456789abcde", // one hex digit short
+            "sess_0123456789abcde",   // one hex digit short
             "sess_0123456789abcdef0", // one too long
-            "sess_0123456789ABCDEF", // upper case
+            "sess_0123456789ABCDEF",  // upper case
             "sess_0123456789abcdef;rm -rf /",
             "proj_0123456789abcdef",
             "",
@@ -5494,7 +5579,10 @@ mod resume_tests {
         assert!(line.contains("unavailable"), "{line}");
         assert!(!plat.acted(), "an invalid directory opens no terminal");
         // No substitute directory anywhere in the line.
-        assert!(!line.contains(&dir.to_string_lossy().into_owned()), "{line}");
+        assert!(
+            !line.contains(&dir.to_string_lossy().into_owned()),
+            "{line}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6603,13 +6691,7 @@ mod property_tests {
     }
 
     const CLASSES: &[&str] = &[
-        "blank",
-        "info",
-        "act",
-        "end",
-        "unknown",
-        "question",
-        "too-long",
+        "blank", "info", "act", "end", "unknown", "question", "too-long",
     ];
 
     fn class_name(input: &ChatInput) -> &'static str {
@@ -7422,7 +7504,11 @@ mod property_tests {
         }
     }
 
-    fn synth_notification(id: i64, session_id: &str, project_id: &str) -> crate::store::Notification {
+    fn synth_notification(
+        id: i64,
+        session_id: &str,
+        project_id: &str,
+    ) -> crate::store::Notification {
         crate::store::Notification {
             id,
             kind: "attention".to_string(),
@@ -7440,7 +7526,11 @@ mod property_tests {
         }
     }
 
-    fn synth_prev(session_id: &str, project_id: &str, project_dir: &str) -> crate::store::PrevSession {
+    fn synth_prev(
+        session_id: &str,
+        project_id: &str,
+        project_dir: &str,
+    ) -> crate::store::PrevSession {
         crate::store::PrevSession {
             session_id: session_id.to_string(),
             project_id: Some(project_id.to_string()),
