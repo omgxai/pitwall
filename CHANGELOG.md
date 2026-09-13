@@ -15,6 +15,8 @@ All notable changes to Pitwall are documented here. Format follows
   in the shell log.
 
 ### Added
+- Read-only `pitwall doctor` report for installed binary, state/config paths,
+  Omarchy plugin presence, and snapshot timer status.
 - M6 user-local packaging: idempotent `packaging/install.sh`, explicit
   timer/plugin opt-ins, data-preserving uninstall, and
   `packaging/test-install.sh` clean-room verification.

@@ -120,8 +120,10 @@ cards; RESUME history rows.
 
 CLI surface (all explicit, no daemons): `status [--json]`,
 `snapshot`, `checkpoint`, `resume`, `agents`, `models`, `summarize`,
-`assign`, `notifications`, `config`. Exit codes: 0 ok, 1 operational
-failure, 2 usage error.
+`assign`, `notifications`, `config`, `doctor`. Exit codes: 0 ok, 1
+operational failure, 2 usage error. `pitwall doctor` is a read-only
+installation report: it checks the binary, data/config artifacts, plugin
+path, and optional user timer without creating state or enabling services.
 
 ## UI mental model
 
@@ -263,6 +265,12 @@ Uninstall disables the Pitwall user timer, removes the binary, plugin, and
 units, and leaves user data intact. If the plugin directory was not installed
 by Pitwall, it is left untouched. The clean-room smoke test is
 `packaging/test-install.sh` after `cargo build --release`.
+
+For a quick installation check after setup:
+
+```bash
+pitwall doctor
+```
 
 ## Develop
 

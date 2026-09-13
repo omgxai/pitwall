@@ -40,6 +40,7 @@ fn print_help() {
     println!("    summarize        Ask the configured agent for a workspace summary");
     println!("    config             Get/set user configuration (get [key] | set <key> <value>)");
     println!("    notifications      List inbox ([--unread]) or mark read (read <id>)");
+    println!("    doctor             Check installed paths and optional Omarchy integration");
     println!("    assign           Assign a task to a live session (--session-id ID --role ROLE --prompt TEXT [--model P/M] [--timeout SECS])");
     println!("                     [--agent ID] [--model P/M] [--dir DIR]");
     println!("                     [--timeout SECS] [--dry-run] [--clear] [--data-dir DIR]");
@@ -63,6 +64,86 @@ fn cmd_status(json: bool) -> ExitCode {
         print!("{}", output::snapshot_to_text(&snapshot));
     }
     ExitCode::SUCCESS
+}
+
+/// Print a small, non-invasive installation report. Doctor never creates
+/// state, starts the timer, enables the plugin, or reads process contents.
+fn cmd_doctor(args: &[String]) -> ExitCode {
+    if !args.is_empty() {
+        eprintln!("pitwall doctor: unknown option '{}'.", args[0]);
+        return ExitCode::from(2);
+    }
+
+    let data_dir = store::default_data_dir();
+    let state_path = data_dir.join(store::STATE_FILENAME);
+    let db_path = data_dir.join(store::DB_FILENAME);
+    let config_path = pitwall_lib::config::config_path();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let plugin_path = home
+        .as_ref()
+        .map(|h| h.join(".config/omarchy/plugins/dev.pitwall"));
+    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pitwall"));
+
+    println!("Pitwall doctor");
+    println!("  version: {}", pitwall_lib::version());
+    println!("  binary: {}", binary.display());
+    println!("  data: {}", data_dir.display());
+    println!("  config: {}", config_path.display());
+
+    let mut failed = false;
+    if data_dir.is_dir() {
+        println!("  data directory: OK");
+    } else if data_dir.exists() {
+        println!("  data directory: ERROR (not a directory)");
+        failed = true;
+    } else {
+        println!("  data directory: not initialized (run `pitwall snapshot`)");
+    }
+    report_artifact("state.json", &state_path);
+    report_artifact("SQLite database", &db_path);
+    report_artifact("config", &config_path);
+
+    match plugin_path {
+        Some(path) if path.join("manifest.json").is_file() => {
+            println!("  Omarchy plugin: OK ({})", path.display());
+        }
+        Some(path) => println!("  Omarchy plugin: not installed ({})", path.display()),
+        None => println!("  Omarchy plugin: HOME is unavailable"),
+    }
+
+    match std::process::Command::new("systemctl")
+        .args(["--user", "is-enabled", "pitwall-snapshot.timer"])
+        .output()
+    {
+        Ok(output) => {
+            let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if output.status.success() {
+                println!(
+                    "  snapshot timer: {}",
+                    if state.is_empty() { "enabled" } else { &state }
+                );
+            } else if state.is_empty() {
+                println!("  snapshot timer: unavailable or not installed");
+            } else {
+                println!("  snapshot timer: {state}");
+            }
+        }
+        Err(_) => println!("  snapshot timer: systemctl unavailable"),
+    }
+
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn report_artifact(label: &str, path: &std::path::Path) {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => println!("  {label}: OK ({})", path.display()),
+        Ok(_) => println!("  {label}: ERROR (not a regular file)"),
+        Err(_) => println!("  {label}: not present ({})", path.display()),
+    }
 }
 
 /// Collect one observation, persist it (hash-gated), and refresh the
@@ -1101,6 +1182,7 @@ fn main() -> ExitCode {
         Some("config") => cmd_config(&args[1..]),
         Some("notifications") => cmd_notifications(&args[1..]),
         Some("assign") => cmd_assign(&args[1..]),
+        Some("doctor") => cmd_doctor(&args[1..]),
         Some(other) => {
             eprintln!("pitwall: unknown subcommand '{other}'. Run `pitwall --help`.");
             ExitCode::from(2)
