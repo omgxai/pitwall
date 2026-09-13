@@ -29,7 +29,7 @@ Panel {
   property bool generating: false
   property string feedbackText: ""
   property bool feedbackAttention: false
-  readonly property real tickerSpeedPxPerSec: 90
+  readonly property real tickerSpeedPxPerSec: 180
   // The installer places the binary in the user-local bin directory. Keep a
   // PATH fallback for development environments that provide another install.
   readonly property string pitwallBinary: {
@@ -684,45 +684,39 @@ Panel {
                   radius: Style.space(3)
                 }
 
-                Text {
-                  id: tickerMeasure
-                  visible: false
-                  textFormat: Text.PlainText
-                  text: root.summaryShort() + "  ·  "
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  onTextChanged: tickerTrack.x = 0
-                }
-
                 Item {
                   id: tickerTrack
                   visible: !root.summaryExpanded
-                  x: 0
+                  x: tickerViewport.width
                   y: Style.space(5)
-                  width: tickerMeasure.implicitWidth * tickerRepeater.count
-                  height: tickerMeasure.implicitHeight
+                  width: marqueeText.implicitWidth
+                  height: marqueeText.implicitHeight
 
-                  Repeater {
-                    id: tickerRepeater
-                    model: Math.max(2, Math.ceil(tickerViewport.width / Math.max(1, tickerMeasure.implicitWidth)) + 2)
-                    delegate: Text {
-                      width: tickerMeasure.implicitWidth
-                      height: tickerMeasure.implicitHeight
-                      textFormat: Text.PlainText
-                      text: tickerMeasure.text
-                      color: Color.foreground
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.bodySmall
-                      renderType: Text.NativeRendering
+                  Text {
+                    id: marqueeText
+                    textFormat: Text.PlainText
+                    text: root.summaryShort() + "  ·  "
+                    width: implicitWidth
+                    height: implicitHeight
+                    elide: Text.ElideNone
+                    color: Color.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    renderType: Text.NativeRendering
+                    onTextChanged: {
+                      tickerTrack.x = tickerViewport.width
+                      tickerAnimation.restart()
                     }
                   }
 
                   NumberAnimation on x {
                     id: tickerAnimation
-                    to: -tickerMeasure.implicitWidth
-                    duration: Math.max(700, Math.round(tickerMeasure.implicitWidth / root.tickerSpeedPxPerSec * 1000))
+                    from: tickerViewport.width
+                    to: -marqueeText.implicitWidth
+                    duration: Math.max(700, Math.round((tickerViewport.width + marqueeText.implicitWidth) / root.tickerSpeedPxPerSec * 1000))
                     loops: Animation.Infinite
-                    running: root.opened && !root.summaryExpanded && !tickHover.hovered
+                    running: root.opened && tickerViewport.visible
+                    paused: root.summaryExpanded || tickHover.hovered
                     easing.type: Easing.Linear
                   }
                 }
