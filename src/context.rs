@@ -431,7 +431,7 @@ fn session_block(
             out.push_str(&format!("    \"term_last\": {}\n", str_list(last)));
         }
         TerminalText::Unavailable { reason } => {
-            out.push_str(&format!("    \"terminal_text\": {},\n", q(reason)));
+            out.push_str(&format!("    \"terminal_text\": {}\n", q(reason)));
         }
     }
     out
@@ -890,6 +890,10 @@ mod tests {
             "{doc}"
         );
         assert!(!doc.contains("term_first"), "{doc}");
+        assert!(
+            !doc.contains("no scrollback API\",\n"),
+            "trailing comma: {doc}"
+        );
     }
 
     #[test]
