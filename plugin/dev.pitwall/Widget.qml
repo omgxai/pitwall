@@ -641,24 +641,58 @@ Panel {
 
             // ---- AI summary ticker ----
             Column {
-              visible: root.cfgSummary
-              width: parent.width
-              spacing: Style.space(4)
+             visible: root.cfgSummary
+             width: parent.width
+             spacing: Style.space(4)
+
+              Row {
+                width: parent.width
+                spacing: Style.space(4)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "AI BRIEF"
+                  color: Qt.darker(Color.foreground, 1.35)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  renderType: Text.NativeRendering
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.summary && root.summary.status === "ready" ? "●" : "○"
+                  color: root.summary && root.summary.status === "ready" ? Color.accent : Color.muted
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  renderType: Text.NativeRendering
+                }
+              }
 
               Item {
                 visible: root.summaryText() !== ""
                 width: parent.width
-                height: summaryBody.implicitHeight
+                height: summaryBody.implicitHeight + Style.space(10)
                 clip: true
+
+                Rectangle {
+                  anchors.fill: parent
+                  color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.045)
+                  border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.16)
+                  border.width: 1
+                  radius: Style.space(3)
+                }
 
                 Text {
                   id: summaryBody
-                  width: parent.width
+                  x: Style.space(5)
+                  y: Style.space(5)
+                  width: parent.width - Style.space(10)
                   textFormat: Text.PlainText
                   wrapMode: root.summaryExpanded ? Text.Wrap : Text.NoWrap
                   elide: root.summaryExpanded ? Text.ElideNone : Text.ElideRight
                   maximumLineCount: root.summaryExpanded ? 6 : 1
-                   text: root.tickerText()
+                  text: root.tickerText()
                   color: Color.foreground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
@@ -691,8 +725,8 @@ Panel {
                       easing.type: Easing.InOutQuad
                     }
                   }
-                   onDriftChanged: if (!drift) x = 0
-                   onTextChanged: x = 0
+                  onDriftChanged: if (!drift) x = 0
+                  onTextChanged: x = 0
 
                   HoverHandler {
                     id: tickHover
