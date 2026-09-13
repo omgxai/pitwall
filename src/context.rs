@@ -257,14 +257,14 @@ impl SummaryContext {
         }
         for c in &self.checkpoints {
             out.push_str(&format!(
-                "checkpoint={}|{}|{}|{}|{:?}|{}|{}\n",
+                "checkpoint={}|{}|{}|{}|{}|{}|{}\n",
                 c.id,
-                c.project_id,
-                c.session_id,
-                c.trigger,
-                c.branch,
-                c.state,
-                c.note.as_deref().unwrap_or("")
+                scrub_string(&c.project_id),
+                scrub_string(&c.session_id),
+                scrub_string(&c.trigger),
+                scrub_string(c.branch.as_deref().unwrap_or("")),
+                scrub_string(&c.state),
+                scrub_string(c.note.as_deref().unwrap_or(""))
             ));
         }
         for n in &self.notifications {
