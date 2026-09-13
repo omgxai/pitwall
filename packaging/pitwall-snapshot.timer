@@ -6,6 +6,7 @@ Documentation=https://github.com/omgxai/pitwall
 # the panel responsive to session lifecycle changes without a resident daemon.
 
 [Timer]
+Unit=pitwall.service
 OnBootSec=30s
 OnUnitActiveSec=30s
 Persistent=false
