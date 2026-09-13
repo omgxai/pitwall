@@ -175,6 +175,113 @@ pub struct Event {
     pub detail: String,
 }
 
+/// The privacy boundary shared by summary generation and future workspace
+/// question surfaces. This type contains only bounded, already-observed
+/// Pitwall facts. It deliberately has no process command lines, environment,
+/// credentials, arbitrary file contents, or terminal transcript text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryContext {
+    pub snapshot: WorkspaceSnapshot,
+    pub events: Vec<Event>,
+    pub checkpoints: Vec<Checkpoint>,
+    pub notifications: Vec<crate::store::Notification>,
+}
+
+impl SummaryContext {
+    pub fn new(
+        snapshot: WorkspaceSnapshot,
+        mut events: Vec<Event>,
+        mut checkpoints: Vec<Checkpoint>,
+        mut notifications: Vec<crate::store::Notification>,
+    ) -> Self {
+        events.sort_by(|a, b| {
+            (
+                a.kind,
+                a.session_id.as_str(),
+                a.project.as_str(),
+                a.detail.as_str(),
+            )
+                .cmp(&(
+                    b.kind,
+                    b.session_id.as_str(),
+                    b.project.as_str(),
+                    b.detail.as_str(),
+                ))
+        });
+        checkpoints.sort_by_key(|c| (c.project_id.clone(), c.session_id.clone(), c.id));
+        notifications.sort_by_key(|n| (n.kind.clone(), n.session_id.clone(), n.id));
+        Self {
+            snapshot,
+            events,
+            checkpoints,
+            notifications,
+        }
+    }
+
+    /// Stable structured representation for cache identity. Volatile sample
+    /// time, PIDs, window addresses, and terminal text are intentionally out.
+    pub fn stable_serialized(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("host={}\n", self.snapshot.hostname));
+        let mut sessions: Vec<_> = self.snapshot.sessions.iter().collect();
+        sessions.sort_by(|a, b| a.id.cmp(&b.id));
+        for s in sessions {
+            out.push_str(&format!(
+                "session={}|state={}|role={}|procs={}|last={}|agent={}|conf={}|",
+                s.id,
+                s.state.as_str(),
+                s.role.as_str(),
+                s.process_count,
+                s.last_activity_epoch,
+                s.agent.kind.as_str(),
+                s.agent.confidence.as_str()
+            ));
+            if let Some(p) = &s.project {
+                out.push_str(&format!(
+                    "project={}|{}|{:?}|{:?}|{}|",
+                    p.id, p.dir, p.branch, p.git_clean, p.is_git_repo
+                ));
+            } else {
+                out.push_str("project=-|");
+            }
+            out.push('\n');
+        }
+        for e in &self.events {
+            out.push_str(&format!(
+                "event={}|{}|{}|{}\n",
+                e.kind,
+                scrub_string(&e.session_id),
+                scrub_string(&e.project),
+                scrub_string(&e.detail)
+            ));
+        }
+        for c in &self.checkpoints {
+            out.push_str(&format!(
+                "checkpoint={}|{}|{}|{}|{:?}|{}|{}\n",
+                c.id,
+                c.project_id,
+                c.session_id,
+                c.trigger,
+                c.branch,
+                c.state,
+                c.note.as_deref().unwrap_or("")
+            ));
+        }
+        for n in &self.notifications {
+            out.push_str(&format!(
+                "notification={}|{}|{}|{}|{}|{}\n",
+                n.id,
+                scrub_string(&n.kind),
+                scrub_string(&n.session_id),
+                scrub_string(&n.severity),
+                scrub_string(&n.state),
+                scrub_string(&n.detail)
+            ));
+        }
+        out
+    }
+}
+
 /// Derive events by diffing the previous retained observation against the
 /// current snapshot, plus recently created checkpoints. Pure function over
 /// small inputs; capped by the caller. No new tables, no logging subsystem.
@@ -399,6 +506,21 @@ pub fn build_context(
         }
         keep -= 1;
     }
+}
+
+/// Render the bounded ephemeral agent document from the canonical context.
+/// Terminal text remains sampled only here, after the structured boundary has
+/// been assembled, and is never part of `SummaryContext` or its hash.
+pub fn build_context_from_summary(
+    platform: &dyn Platform,
+    context: &SummaryContext,
+) -> (String, usize) {
+    build_context(
+        platform,
+        &context.snapshot,
+        &context.events,
+        &context.checkpoints,
+    )
 }
 
 /// Render one document over an already-ordered session slice.
@@ -657,6 +779,26 @@ mod tests {
                 .map(|(id, role, e)| session(id, *role, *e))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn summary_context_is_deterministic_bounded_and_scrubbed() {
+        let snapshot = snapshot_with(&[
+            ("sess_b", WindowRole::Terminal, 2),
+            ("sess_a", WindowRole::Terminal, 1),
+        ]);
+        let event = Event {
+            kind: "session_appeared",
+            session_id: "sess_a".into(),
+            project: "Work".into(),
+            detail: "password=sk-live-ABCDEF123456".into(),
+        };
+        let first = SummaryContext::new(snapshot.clone(), vec![event.clone()], vec![], vec![]);
+        let second = SummaryContext::new(snapshot, vec![event], vec![], vec![]);
+        assert_eq!(first.stable_serialized(), second.stable_serialized());
+        assert!(first.stable_serialized().contains("[redacted]"));
+        assert!(!first.stable_serialized().contains("sk-live-ABCDEF123456"));
+        assert!(first.stable_serialized().len() < 16 * 1024);
     }
 
     #[test]

@@ -382,8 +382,13 @@ fn cmd_snapshot(args: &[String]) -> ExitCode {
             // Only expose a cached summary when its exact structured input is
             // still current. Otherwise mark it stale instead of presenting an
             // old sentence as though it described this workspace.
-            let current_summary_hash =
-                summary_mod::input_hash(&snapshot, &summary_events, &summary_checkpoints);
+            let summary_context = pitwall_lib::context::SummaryContext::new(
+                snapshot.clone(),
+                summary_events.clone(),
+                summary_checkpoints.clone(),
+                notification_view(&db).0,
+            );
+            let current_summary_hash = summary_mod::input_hash(&summary_context);
             match s.latest_summary() {
                 Ok(Some(row)) => {
                     last_summary = Some(if row.input_hash == current_summary_hash {
@@ -761,12 +766,24 @@ fn cmd_summarize(args: &[String]) -> ExitCode {
         }
     }
 
+    let summary_context = pitwall_lib::context::SummaryContext::new(
+        snapshot.clone(),
+        events.clone(),
+        checkpoints.clone(),
+        notification_view(
+            &data_dir
+                .clone()
+                .unwrap_or_else(store::default_data_dir)
+                .join(store::DB_FILENAME),
+        )
+        .0,
+    );
     let (document, truncated) =
-        pitwall_lib::context::build_context(&plat, &snapshot, &events, &checkpoints);
+        pitwall_lib::context::build_context_from_summary(&plat, &summary_context);
     if truncated > 0 {
         eprintln!("pitwall summarize: note: {truncated} session(s) omitted from context");
     }
-    let input_hash = summary_mod::input_hash(&snapshot, &events, &checkpoints);
+    let input_hash = summary_mod::input_hash(&summary_context);
     let data_path = data_dir.clone().unwrap_or_else(store::default_data_dir);
     let state_path = data_path.join(store::STATE_FILENAME);
 
