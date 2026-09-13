@@ -42,6 +42,10 @@ Column {
   property string assignRole: "UI Auditor"
   property string assignResult: ""
   property bool assignRunning: false
+  readonly property string pitwallBinary: {
+    var home = String(Quickshell.env("HOME") || "")
+    return home !== "" ? home + "/.local/bin/pitwall" : "pitwall"
+  }
 
   signal clicked()
   signal hovered(bool isHovered)
@@ -64,7 +68,7 @@ Column {
     assignResult = ""
     assignProc.sessionId = sid
     assignProc.command = [
-      "pitwall", "assign",
+      root.pitwallBinary, "assign",
       "--session-id", sid,
       "--role", String(assignRole),
       "--prompt", prompt

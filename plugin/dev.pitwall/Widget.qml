@@ -29,6 +29,12 @@ Panel {
   property bool generating: false
   property string feedbackText: ""
   property bool feedbackAttention: false
+  // The installer places the binary in the user-local bin directory. Keep a
+  // PATH fallback for development environments that provide another install.
+  readonly property string pitwallBinary: {
+    var home = String(Quickshell.env("HOME") || "")
+    return home !== "" ? home + "/.local/bin/pitwall" : "pitwall"
+  }
   // Local settings mirror (initialized from state echo, updated on change).
   property string cfgAgent: "opencode"
   property string cfgModel: ""
@@ -168,7 +174,7 @@ Panel {
       root.announce("Could not resume: invalid session.", true)
       return
     }
-    runFixed(["pitwall", "resume", "--session-id", sid], function(code) {
+    runFixed([root.pitwallBinary, "resume", "--session-id", sid], function(code) {
       if (code !== 0) {
         console.warn("pitwall", "resume exited", code, "for", sid)
         root.announce("Resume failed. The workspace target may be gone.", true)
@@ -292,7 +298,7 @@ Panel {
 
   function refreshModels(agent, then) {
     modelsProc.onDone = then || null
-    modelsProc.command = ["pitwall", "models", "--agent", String(agent || "opencode")]
+    modelsProc.command = [root.pitwallBinary, "models", "--agent", String(agent || "opencode")]
     modelsProc.running = true
   }
 
@@ -309,7 +315,7 @@ Panel {
 
   Process {
     id: refreshProc
-    command: ["pitwall", "snapshot"]
+    command: [root.pitwallBinary, "snapshot"]
     stdout: StdioCollector {}
     stderr: StdioCollector {}
     onExited: function(code) {
@@ -343,7 +349,7 @@ Panel {
 
   function generateSummary() {
     if (root.generating) return
-    var args = ["pitwall", "summarize", "--agent", root.cfgAgent]
+    var args = [root.pitwallBinary, "summarize", "--agent", root.cfgAgent]
     if (root.cfgModel !== "") {
       args.push("--model")
       args.push(root.cfgModel)
@@ -582,7 +588,7 @@ Panel {
               onChanged: function(v) {
                 root.cfgAgent = v
                 root.cfgModel = ""
-                runFixed(["pitwall", "config", "set", "agent", v], function(code) {
+                runFixed([root.pitwallBinary, "config", "set", "agent", v], function(code) {
                   if (code !== 0) console.warn("pitwall", "config set agent failed", code)
                   root.refreshModels(v)
                 })
@@ -597,7 +603,7 @@ Panel {
               onChanged: function(v) {
                 var m = (v === "Agent default") ? "" : v
                 root.cfgModel = m
-                runFixed(["pitwall", "config", "set", "model", m], function(code) {
+                runFixed([root.pitwallBinary, "config", "set", "model", m], function(code) {
                   if (code !== 0) console.warn("pitwall", "config set model failed", code)
                 })
               }
@@ -610,7 +616,7 @@ Panel {
               checked: root.cfgSummary
               onClicked: {
                 root.cfgSummary = !root.cfgSummary
-                runFixed(["pitwall", "config", "set", "summary_enabled", root.cfgSummary ? "true" : "false"], function(code) {
+                runFixed([root.pitwallBinary, "config", "set", "summary_enabled", root.cfgSummary ? "true" : "false"], function(code) {
                   if (code !== 0) console.warn("pitwall", "config set summary failed", code)
                 })
               }
@@ -970,7 +976,7 @@ Panel {
   function markNotifRead(id) {
     var nid = Number(id) || 0
     if (nid <= 0) return
-    runFixed(["pitwall", "notifications", "read", String(nid)], function(code) {
+    runFixed([root.pitwallBinary, "notifications", "read", String(nid)], function(code) {
       if (code !== 0) console.warn("pitwall", "notification read exited", code)
       stateReader.refresh()
     })
