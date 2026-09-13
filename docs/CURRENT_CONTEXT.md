@@ -286,6 +286,10 @@ deferred because the current runner is synchronous summary-only execution.
 The shared `SummaryContext` is now the deterministic privacy boundary for
 sessions, events, checkpoints, and scrubbed notification facts; terminal
 text is still ephemeral and excluded from its hash.
+The visual pass labels the summary surface `AI BRIEF` and uses a subdued
+palette-bound surface; the installed panel was updated, but a live
+Quickshell restart/click-through remains unverified because of the existing
+duplicate IPC handler.
 Directions: AI Workforce Design + community Recipes (see
 `docs/AI_WORKFORCE.md`, `docs/RECIPES.md`). Contribute: recipes,
 patterns, Omarchy integration, detection, docs, tests. MIT.

@@ -247,6 +247,11 @@ bounded `SummaryContext` containing observed sessions, derived events,
 checkpoints, and scrubbed notification facts; terminal text remains confined
 to the existing ephemeral summary document path.
 
+The panel presents that interpretation as a compact `AI BRIEF`, keeping the
+brief visually subordinate to Pitwall identity and workspace groups. A chat
+control is intentionally absent until a real interactive execution path is
+available.
+
 ## Branding
 
 - `assets/flag.svg` (+ `flag-64.png`): the 16px checkered flag — the

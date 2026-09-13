@@ -13,6 +13,9 @@ All notable changes to Pitwall are documented here. Format follows
   panel is open, with hover/expanded pause and clean reset on content change.
 - M7 panel feedback: expanded `PITWALL · N` session count and targeted
   notification-read confirmation.
+- M7 visual pass: labeled the summary surface as `AI BRIEF`, added a compact
+  subdued palette-bound brief surface, and kept the session rail visually
+  primary. No chat affordance is shown while Chat remains deferred.
 - M7 `SummaryContext`: one deterministic, bounded, scrubbed structured
   context now feeds summary hashing and future workspace-aware surfaces.
   Interactive Chat remains deferred pending a safe question execution path.
