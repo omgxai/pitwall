@@ -283,7 +283,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 pub fn title_context_label(d: &ChatDescriptor) -> String {
     let head = compose_title(&d.number_text(), d.harness(), d.model_label(), "");
     let room = MAX_CHAT_TITLE_CHARS.saturating_sub(head.chars().count());
-    let budget = room.min(MAX_CONTEXT_LABEL_CHARS).max(1);
+    let budget = room.clamp(1, MAX_CONTEXT_LABEL_CHARS);
     debug_assert!(room >= 39, "title head grew beyond the documented worst case");
     truncate_chars(d.context_label(), budget)
 }
@@ -4589,7 +4589,7 @@ mod responder_tests {
             &obs,
             &question("what is running?"),
             &runtime,
-            &[bin_dir.clone()],
+            std::slice::from_ref(&bin_dir),
             Duration::from_secs(10),
         )
         .unwrap();
@@ -4649,7 +4649,7 @@ mod responder_tests {
             &obs,
             &question("what is running?"),
             &runtime,
-            &[bin_dir.clone()],
+            std::slice::from_ref(&bin_dir),
             Duration::from_secs(10),
         )
         .unwrap();
@@ -4681,7 +4681,7 @@ mod responder_tests {
             &obs,
             &question("what is running?"),
             &runtime,
-            &[bin_dir.clone()],
+            std::slice::from_ref(&bin_dir),
             Duration::from_secs(10),
         )
         .unwrap_err();
@@ -4720,7 +4720,7 @@ mod responder_tests {
             &obs,
             &question("what is running?"),
             &runtime,
-            &[bin_dir.clone()],
+            std::slice::from_ref(&bin_dir),
             Duration::from_secs(10),
         )
         .unwrap_err();
@@ -4747,7 +4747,7 @@ mod responder_tests {
             &obs,
             &question("what is running?"),
             &runtime,
-            &[bin_dir.clone()],
+            std::slice::from_ref(&bin_dir),
             Duration::from_secs(1),
         )
         .unwrap_err();
@@ -4776,7 +4776,7 @@ mod responder_tests {
             &obs,
             &question("what is running?"),
             &runtime,
-            &[bin_dir.clone()],
+            std::slice::from_ref(&bin_dir),
             Duration::from_secs(10),
         )
         .unwrap_err();
