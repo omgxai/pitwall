@@ -79,7 +79,8 @@ cards; RESUME history rows.
   agents.
 - **Actions: Focus / Stop / Close / Resume.** Explicit clicks only.
   Stop is SIGTERM-only; Close closes the window; Resume
-  focuses-or-reopens. Strict validation, no fallbacks.
+  focuses-or-reopens. Strict validation, no fallbacks. Failed targets and
+  command results remain visible as compact, non-blocking panel feedback.
 - **AI summaries (explicit, cached).** `pitwall summarize` or the
   Generate button builds an ephemeral bounded context — structured
   state + derived events + checkpoints + up to 10+10 terminal lines

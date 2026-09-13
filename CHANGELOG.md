@@ -10,6 +10,9 @@ All notable changes to Pitwall are documented here. Format follows
 - Tightened the optional snapshot timer from five minutes to 30 seconds so
   session appearance, disappearance, and stop transitions reach the watched
   panel promptly. The oneshot collector remains read-only and hash-gated.
+- Added compact in-panel feedback for explicit refresh, summary, resume,
+  stop, close, and workspace-target failures; failures no longer exist only
+  in the shell log.
 
 ### Added
 - M5g notification inbox (frozen): `notifications` table (schema v4,
