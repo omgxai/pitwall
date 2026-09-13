@@ -4157,6 +4157,174 @@ mod tests {
             assert!(msg.contains(entry.name), "{msg}");
         }
     }
+
+    // --- branding and the textual header fallback (task 9.7) --------------
+    //
+    // Every case here is decided from arguments alone: the capability arrives
+    // as a value and the asset as a path in a sandbox directory. No terminal
+    // is probed, no real asset is read, and the production data directory is
+    // never consulted.
+
+    /// The capability probe's three answers, named short so that every
+    /// decision below reads as one line.
+    const NO_INLINE: crate::platform::InlineImage = crate::platform::InlineImage::None;
+    const SIXEL: crate::platform::InlineImage = crate::platform::InlineImage::Sixel;
+    const KITTY: crate::platform::InlineImage = crate::platform::InlineImage::Kitty;
+
+    /// A PNG head that [`renderable_asset`] accepts: signature, IHDR length,
+    /// IHDR type, and [`BRANDING_DISPLAY_PX`] square dimensions.
+    ///
+    /// Only the leading bytes matter — the decision is signature-based and
+    /// reads the IHDR fields, so this is exactly as much file as it needs.
+    fn png_head_256() -> Vec<u8> {
+        let mut bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&BRANDING_DISPLAY_PX.to_be_bytes());
+        bytes.extend_from_slice(&BRANDING_DISPLAY_PX.to_be_bytes());
+        // Bit depth, colour type, compression, filter, interlace.
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn a_terminal_without_inline_images_is_text_only_even_with_an_asset() {
+        let dir = sandbox();
+        // A *renderable* asset, so the only reason for the textual header is
+        // the absent capability (20.8).
+        let asset = dir.join(BRANDING_ASSET_FILE);
+        std::fs::write(&asset, png_head_256()).unwrap();
+        let accepted = renderable_asset(&asset);
+        assert_eq!(accepted, Some(asset.clone()));
+
+        let no_capability = plan_branding(NO_INLINE, Some(asset.as_path()));
+        assert_eq!(no_capability, Branding::TextOnly);
+        // Sixel is the textual header too: Pitwall carries no sixel encoder,
+        // and "capability present but unusable" is not a third outcome.
+        let sixel = plan_branding(SIXEL, Some(asset.as_path()));
+        assert_eq!(sixel, Branding::TextOnly);
+        // And with no asset located at all, the same answer.
+        let neither = plan_branding(NO_INLINE, None);
+        assert_eq!(neither, Branding::TextOnly);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inline_capability_without_a_usable_asset_is_silently_text_only() {
+        let dir = sandbox();
+        let missing = dir.join(BRANDING_ASSET_FILE);
+        assert!(!missing.exists(), "the sandbox starts empty");
+
+        let planned = plan_branding(KITTY, Some(missing.as_path()));
+        assert_eq!(planned, Branding::TextOnly);
+        // Nothing is said about the picture that is not there (20.8, 28.10).
+        let mut sink: Vec<u8> = Vec::new();
+        print_branding(&mut sink, &planned).unwrap();
+        assert!(
+            sink.is_empty(),
+            "a missing asset must be silent, wrote {:?}",
+            String::from_utf8_lossy(&sink)
+        );
+
+        // A file that is present but not an emittable asset is the same
+        // silent answer, not a warning.
+        let jpeg = dir.join("pitwallpixelart.jpeg");
+        std::fs::write(&jpeg, b"\xff\xd8\xff\xe0 not a png").unwrap();
+        let unrenderable = plan_branding(KITTY, Some(jpeg.as_path()));
+        assert_eq!(unrenderable, Branding::TextOnly);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn text_only_branding_writes_not_one_byte() {
+        let mut sink: Vec<u8> = Vec::new();
+        print_branding(&mut sink, &Branding::TextOnly).unwrap();
+        assert!(
+            sink.is_empty(),
+            "TextOnly writes no note and no blank line, wrote {:?}",
+            String::from_utf8_lossy(&sink)
+        );
+    }
+
+    #[test]
+    fn the_textual_header_is_printed_whole_when_there_is_no_asset() {
+        let dir = sandbox();
+        let path = dir.to_string_lossy().into_owned();
+        let d = descriptor_at(&path);
+
+        let mut printed: Vec<u8> = Vec::new();
+        print_header(&mut printed, &d, &Branding::TextOnly, Palette::plain()).unwrap();
+        let printed_text = String::from_utf8(printed).expect("the header is UTF-8");
+        // The exact 20.8 guarantee: the complete textual header, and the
+        // branding stage adds nothing to it in either direction.
+        let expected = render_header(&d, Palette::plain());
+        assert_eq!(printed_text, expected);
+
+        // Complete: wordmark, title, fields, coverage, prompt banner.
+        assert!(printed_text.contains(WORDMARK), "{printed_text}");
+        let title = header_title(&d);
+        assert!(printed_text.contains(&title), "{printed_text}");
+        for (label, value) in header_fields(&d) {
+            assert!(printed_text.contains(label), "{printed_text}");
+            assert!(printed_text.contains(&value), "{printed_text}");
+        }
+        for line in context_block(&d) {
+            assert!(printed_text.contains(&line), "{printed_text}");
+        }
+        for line in prompt_banner() {
+            assert!(printed_text.contains(&line), "{printed_text}");
+        }
+
+        // And no apology, no warning, and no alternative graphics mechanism
+        // announced: the absent picture is never mentioned (20.8).
+        let lower = printed_text.to_lowercase();
+        let forbidden = "image picture graphic logo sixel kitty unsupported warning";
+        for word in forbidden.split_whitespace() {
+            assert!(
+                !lower.contains(word),
+                "the textual header must not mention {word:?}: {printed_text}"
+            );
+        }
+        assert!(
+            !printed_text.contains('\u{1b}'),
+            "no escape sequence belongs in the plain textual header: {printed_text:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_inline_terminal_with_a_usable_asset_emits_that_file_then_the_header() {
+        let dir = sandbox();
+        let path = dir.to_string_lossy().into_owned();
+        let d = descriptor_at(&path);
+        let asset = dir.join("pitwall-256.png");
+        std::fs::write(&asset, png_head_256()).unwrap();
+
+        let planned = plan_branding(KITTY, Some(asset.as_path()));
+        let inline = Branding::Inline { path: asset.clone() };
+        assert_eq!(planned, inline);
+
+        // The image is the escape sequence for that exact file plus one
+        // newline, and the header text below it is unchanged — the picture
+        // adds to the header, it does not replace part of it (20.7, 20.8).
+        let sequence = kitty_file_image_sequence(&asset).expect("an absolute, control-free path");
+        let mut want: Vec<u8> = sequence.into_bytes();
+        want.push(b'\n');
+        let mut image_only: Vec<u8> = Vec::new();
+        print_branding(&mut image_only, &planned).unwrap();
+        assert_eq!(image_only, want);
+
+        let mut whole: Vec<u8> = Vec::new();
+        print_header(&mut whole, &d, &planned, Palette::plain()).unwrap();
+        let mut expected = want.clone();
+        expected.extend_from_slice(render_header(&d, Palette::plain()).as_bytes());
+        assert_eq!(whole, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

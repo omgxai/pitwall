@@ -1246,6 +1246,70 @@ mod tests {
     }
 
     #[test]
+    fn the_probe_reports_no_capability_without_a_terminal() {
+        use std::io::IsTerminal as _;
+        // No fake terminal and no mocking: under `cargo test` the harness's
+        // stdout is a pipe, so this drives the real step-1 early return —
+        // the non-interactive case (piped output, CI, the panel's
+        // `Process`), which must be free of side effects. If the test binary
+        // is ever run straight from a terminal there is nothing to fake, and
+        // probing the human's terminal to satisfy an assertion would be the
+        // wrong trade, so that case is skipped rather than mocked.
+        if std::io::stdout().is_terminal() {
+            return;
+        }
+        assert_eq!(probe_inline_image(), InlineImage::None);
+        // The same answer through the trait method the Chat_Header calls,
+        // and asking twice changes nothing. `InlineImage::None` is the
+        // single value that stands for "absent capability" — it is what the
+        // header reads as its textual, unbranded form (20.8). That mapping
+        // lives in `chat` and is asserted there; here the point is only that
+        // every no-capability path produces this one value, never a second
+        // flavour of "no".
+        let plat = LinuxPlatform;
+        assert_eq!(plat.inline_image_capability(), InlineImage::None);
+        assert_eq!(plat.inline_image_capability(), InlineImage::None);
+        assert_ne!(InlineImage::None, InlineImage::Kitty);
+        assert_ne!(InlineImage::None, InlineImage::Sixel);
+    }
+
+    #[test]
+    fn a_timed_out_reply_carries_no_capability() {
+        // A driver timeout leaves a *partial* reply, not an empty one: the
+        // bytes that arrived before the 200 ms window closed. The whole probe
+        // cannot be driven here without a terminal, so this covers the pure
+        // seam either side of the read — the loop must not mistake a
+        // half-arrived answer for a finished one…
+        assert!(!reply_is_complete(b"\x1b_Gi=31;"));
+        assert!(!reply_is_complete(b"\x1b[?62;1;"));
+        // …and a partial answer says nothing we understand, which is the
+        // same outcome as silence.
+        assert_eq!(classify_reply("\u{1b}_Gi=31;"), None);
+        assert_eq!(classify_reply("\u{1b}[?62;1;"), None);
+        // A terminated answer does stop the read early — latency only.
+        assert!(reply_is_complete(b"\x1b_Gi=31;OK\x1b\\"));
+        assert!(reply_is_complete(b"\x1b[?62;1;4c"));
+    }
+
+    #[test]
+    fn a_missing_stty_leaves_the_terminal_untouched() {
+        // `stty` is reached through a fixed argv with no injectable seam, so
+        // the absent-binary path itself is live Omarchy verification: a
+        // missing binary makes `Command::output` fail, makes `stty` return
+        // `None`, and returns `InlineImage::None` from step 2 — *before* the
+        // guard exists and before `raw -echo` is applied, so there is
+        // nothing to restore. What is assertable in-process is the gate that
+        // makes that safe: only one restorable `stty -g` token is ever fed
+        // back to `stty`, so a `stty` that is missing, wrong, or merely
+        // talkative cannot get its output used as an argument.
+        assert!(!is_saved_settings("stty: /dev/tty: No such device or address"));
+        assert!(!is_saved_settings("/dev/tty"));
+        // The length cap, which a garbage `stty` dumping a blob would meet.
+        assert!(is_saved_settings(&"a".repeat(4096)));
+        assert!(!is_saved_settings(&"a".repeat(4097)));
+    }
+
+    #[test]
     fn git_info_detects_repo_branch_and_clean() {
         let dir = std::env::temp_dir().join("pitwall-m1-gitinfo-test");
         let _ = fs::remove_dir_all(&dir);
