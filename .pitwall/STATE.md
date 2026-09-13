@@ -5,6 +5,12 @@
 
 ## Last verified milestone
 
+- **M6 — User-local packaging**: COMPLETE, pushed (`a496796`), with installed
+  plugin binary resolution (`df397a7`), `pitwall doctor` diagnostics
+  (`cb562ef`), and current product README (`c50f1c1`). Clean-room install,
+  first-run state creation, data-preserving uninstall, systemd verification,
+  and release builds pass.
+
 - **M0 — Repository foundation**: COMPLETE, pushed (`62fdfdb`).
 - **M1 — Workspace/process discovery**: COMPLETE, pushed (`7f5ec34`).
 - **M2 — Local state**: COMPLETE, pushed (`5511eaa`).
@@ -18,8 +24,8 @@
 - **M5f final polish — rail UX freeze**: COMPLETE, pushed (`c57e6f9`).
 - **Docs governance — public roadmap + AI workforce**: COMPLETE, pushed (`124be9a`+`07f8554`).
 - **Dogfood wave 1 — real child agents**: COMPLETE, pushed (`99e1d0d`).
-- **M5g tree/grouping — semantic rail**: COMPLETE (pending commit/push below).
-- **M5g assign backend + polish — workforce control**: COMPLETE (pending commit/push below).
+- **M5g tree/grouping — semantic rail**: COMPLETE and pushed.
+- **M5g assign backend + polish — workforce control**: COMPLETE and pushed.
 - **PRE established**: Race Engineer online 2026-09-10; coordination
   files created (`agent_master.md`, child stories, `.agents/`).
 
