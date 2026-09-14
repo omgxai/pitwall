@@ -1177,8 +1177,8 @@ Panel {
                       onClicked: {
                         root.selectedId = (root.selectedId === modelData.selId) ? "" : modelData.selId
                       }
-                      onHovered: function(h) {
-                        root.hoveredId = h ? modelData.selId : ""
+                      onHoveredChanged: {
+                        root.hoveredId = hovered ? modelData.selId : ""
                       }
                       onFocusRequested: root.focusSession(modelData.ref)
                       onStopRequested: root.stopSession(modelData.ref)

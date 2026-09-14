@@ -53,7 +53,10 @@ Column {
   }
 
   signal clicked()
-  signal hovered(bool isHovered)
+  // No `hovered` signal: `hovered` is already the bool property above, and a
+  // property and a signal cannot share a name — the property shadows the
+  // signal, so emitting it raises a TypeError. Observers use the property's
+  // own `hoveredChanged` instead.
   signal notifClicked(int notifId)
 
   // Assignment execution: fixed argv, validated session id, capped
@@ -305,11 +308,9 @@ Column {
       cursorShape: Qt.PointingHandCursor
       onEntered: {
         root.hovered = true
-        root.hovered(true)
       }
       onExited: {
         root.hovered = false
-        root.hovered(false)
       }
       onClicked: root.clicked()
     }
