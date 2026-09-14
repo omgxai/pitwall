@@ -11,6 +11,13 @@ home_dir=${HOME:?HOME is required}
 bin_dir="$home_dir/.local/bin"
 plugin_dir=${XDG_CONFIG_HOME:-"$home_dir/.config"}/omarchy/plugins/dev.pitwall
 plugin_marker="$plugin_dir/.pitwall-managed"
+# The Chat branding asset. `chat::branding_candidates` searches
+# `<data dir>/assets` first, so that is where it is installed. This is the
+# installed-content half of the data directory; the database and the state
+# artifact live beside it and are never touched by this script.
+data_dir=${XDG_DATA_HOME:-"$home_dir/.local/share"}/pitwall
+asset_dir="$data_dir/assets"
+branding_asset="pitwallpixelart.png"
 systemd_dir=${XDG_CONFIG_HOME:-"$home_dir/.config"}/systemd/user
 binary="$repo_dir/target/release/pitwall"
 build=true
@@ -62,9 +69,14 @@ if [[ "$uninstall" == true ]]; then
     systemctl --user disable --now pitwall-snapshot.timer >/dev/null 2>&1 || true
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   fi
+  # The asset is installed content, not user data: remove the file we put
+  # there, then the directory only if it is empty. The database and the state
+  # artifact sit in the parent and are never touched.
   rm -f "$bin_dir/pitwall" \
+    "$asset_dir/$branding_asset" \
     "$systemd_dir/pitwall.service" \
     "$systemd_dir/pitwall-snapshot.timer"
+  rmdir "$asset_dir" >/dev/null 2>&1 || true
   if [[ -f "$plugin_marker" ]]; then
     rm -rf "$plugin_dir"
   else
@@ -83,6 +95,7 @@ if [[ "$build" == true ]]; then
 fi
 [[ -x "$binary" ]] || die "binary is missing or not executable: $binary"
 [[ -d "$repo_dir/plugin/dev.pitwall" ]] || die "plugin source directory is missing: $repo_dir/plugin/dev.pitwall"
+[[ -f "$repo_dir/assets/$branding_asset" ]] || die "branding asset is missing: $repo_dir/assets/$branding_asset"
 
 # Install application files one class at a time. Existing user data is never
 # in these paths, and copying into the plugin directory keeps upgrades
@@ -91,6 +104,7 @@ install -Dm755 "$binary" "$bin_dir/pitwall" || die "could not install binary at 
 mkdir -p "$plugin_dir" || die "could not create plugin directory $plugin_dir"
 cp -a "$repo_dir/plugin/dev.pitwall/." "$plugin_dir/" || die "could not install Omarchy plugin"
 printf 'managed-by=pitwall\n' > "$plugin_marker" || die "could not mark plugin installation"
+install -Dm644 "$repo_dir/assets/$branding_asset" "$asset_dir/$branding_asset" || die "could not install the Chat branding asset"
 install -Dm644 "$repo_dir/packaging/pitwall.service" "$systemd_dir/pitwall.service" || die "could not install systemd service"
 install -Dm644 "$repo_dir/packaging/pitwall-snapshot.timer" "$systemd_dir/pitwall-snapshot.timer" || die "could not install systemd timer"
 
@@ -113,6 +127,7 @@ fi
 
 info "installed binary: $bin_dir/pitwall"
 info "installed plugin: $plugin_dir"
+info "installed Chat branding asset: $asset_dir/$branding_asset"
 info "installed user units: $systemd_dir"
 info "user data is created on first snapshot under ${XDG_DATA_HOME:-"$home_dir/.local/share"}/pitwall"
 if [[ "$enable_timer" != true ]]; then

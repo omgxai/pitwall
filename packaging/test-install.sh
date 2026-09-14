@@ -21,6 +21,12 @@ export XDG_CONFIG_HOME="$tmp_home/config"
 [[ -f "$XDG_CONFIG_HOME/omarchy/plugins/dev.pitwall/.pitwall-managed" ]]
 [[ -f "$XDG_CONFIG_HOME/systemd/user/pitwall.service" ]]
 [[ -f "$XDG_CONFIG_HOME/systemd/user/pitwall-snapshot.timer" ]]
+# The Chat branding asset reaches the first path `chat::branding_candidates`
+# searches, and is the 256x256 PNG the render gate accepts (not the JPEG
+# original, which has no in-tree decoder).
+asset="$XDG_DATA_HOME/pitwall/assets/pitwallpixelart.png"
+[[ -f "$asset" ]]
+head -c 8 "$asset" | od -An -tx1 | tr -d ' \n' | grep -q '^89504e470d0a1a0a$'
 
 version=$("$HOME/.local/bin/pitwall" --version)
 [[ "$version" == pitwall\ * ]]
@@ -31,6 +37,8 @@ version=$("$HOME/.local/bin/pitwall" --version)
 "$repo_dir/packaging/install.sh" --uninstall --no-systemd
 [[ ! -e "$HOME/.local/bin/pitwall" ]]
 [[ ! -e "$XDG_CONFIG_HOME/omarchy/plugins/dev.pitwall" ]]
+# Installed content goes; user data in the same tree stays.
+[[ ! -e "$asset" ]]
 [[ -f "$XDG_DATA_HOME/pitwall/state.json" ]]
 [[ -f "$XDG_DATA_HOME/pitwall/pitwall.db" ]]
 printf 'clean-room install: passed\n'
