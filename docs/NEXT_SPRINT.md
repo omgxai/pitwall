@@ -127,7 +127,6 @@ databases beyond SQLite continuity, no cloud services, no networking
 (tailnets, daemons, remote control), no APIs, no chat systems, no
 agent orchestration, no provider credentials, no billing/marketplace
 mechanisms, no transcript storage, no autonomous actions. See
-`docs/CURRENT_CONTEXT.md` §15 (rejected/deferred) and
 `ROADMAP.md` (out of scope for v0.x).
 
 ## 7. Acceptance criteria (for any sprint item)

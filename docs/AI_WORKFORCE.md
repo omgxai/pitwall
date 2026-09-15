@@ -29,20 +29,20 @@ Human visibility and control
    date-first, committed with the work. Never a chat transcript as truth.
 4. **Approval boundaries are explicit.** Destructive or costly actions
    (deploy, spend, delete, push to shared branches) need a human click.
-5. **Resumption is cheap.** `.pitwall/STATE.md`-style checkpoints let any
-   worker (human or AI) re-enter mid-stream without a handover meeting.
+5. **Resumption is cheap.** A short local checkpoint note per workstream lets
+   any worker (human or AI) re-enter mid-stream without a handover meeting.
 6. **Observation beats interrogation.** Pitwall shows who is working on
    what, so the master coordinates from evidence instead of asking.
 
-## Verified example: the Pitwall Race Engineer run
+## Worked example: AI-assisted development on Pitwall itself
 
-During Pitwall's own M5 development, a coordinator session ran exactly
-this pattern against this repository: a master log (`agent_master.md`),
-scoped child roles (UI vs systems), file-based inbox/status coordination,
-explicit staging discipline on a shared worktree, and `pitwall status`
-dogfooding to see its own session. What is documented here is what was
-actually practiced — single-agent operation included. The pattern scales
-down to one human plus one agent, which is where most developers start.
+During Pitwall's own M5 development, this pattern was practiced against
+this repository: a coordinator planned and integrated, scoped contributors
+(UI vs systems) worked their own areas, Git history stayed the only shared
+truth, and `pitwall status` dogfooding made the work itself visible. What
+is documented here is what was actually practiced — single-agent operation
+included. The pattern scales down to one human plus one agent, which is
+where most developers start.
 
 ## What Pitwall provides vs what agents provide
 

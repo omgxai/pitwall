@@ -32,3 +32,11 @@ plugin/**/*.zip
 
 # Kiro spec workspace (local only, never committed)
 .kiro/
+
+# Local AI-agent working/state files (internal only, never public)
+agent_master.md
+agent_child1.md
+agent_child2.md
+.agents/
+.pitwall/STATE.md
+docs/CURRENT_CONTEXT.md
