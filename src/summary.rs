@@ -521,7 +521,10 @@ mod tests {
         let bin = fake_agent(&dir, "#!/bin/sh\necho START\ncat\n");
         let argv = vec![bin.to_string_lossy().into_owned()];
         let raw = run_agent(&argv, None, Duration::from_secs(10)).unwrap();
-        assert_eq!(raw, "START\n", "None must deliver nothing on stdin: {raw:?}");
+        assert_eq!(
+            raw, "START\n",
+            "None must deliver nothing on stdin: {raw:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

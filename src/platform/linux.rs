@@ -700,7 +700,9 @@ fn da1_has_sixel(reply: &str) -> bool {
         Some(end) => end,
         None => return false,
     };
-    rest[..end].split(';').any(|attribute| attribute.trim() == "4")
+    rest[..end]
+        .split(';')
+        .any(|attribute| attribute.trim() == "4")
 }
 
 /// Classify one reply, or `None` when it says nothing we understand.
@@ -1302,7 +1304,9 @@ mod tests {
         // makes that safe: only one restorable `stty -g` token is ever fed
         // back to `stty`, so a `stty` that is missing, wrong, or merely
         // talkative cannot get its output used as an argument.
-        assert!(!is_saved_settings("stty: /dev/tty: No such device or address"));
+        assert!(!is_saved_settings(
+            "stty: /dev/tty: No such device or address"
+        ));
         assert!(!is_saved_settings("/dev/tty"));
         // The length cap, which a garbage `stty` dumping a blob would meet.
         assert!(is_saved_settings(&"a".repeat(4096)));

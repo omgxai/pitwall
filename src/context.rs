@@ -1398,10 +1398,8 @@ mod tests {
     /// 100+ cases and parallel test threads never share a directory.
     fn prop_sandbox(tag: &str) -> PathBuf {
         let n = PROP_SEQ.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "pitwall-m8-prop-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pitwall-m8-prop-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -1840,8 +1838,8 @@ mod tests {
             0usize..4,
             word(),
         )
-            .prop_map(
-                |(session_id, project, branch, note, state_ix, trigger)| Checkpoint {
+            .prop_map(|(session_id, project, branch, note, state_ix, trigger)| {
+                Checkpoint {
                     // Replaced with a unique id in the test body.
                     id: 0,
                     created_at: 1_700_000_000,
@@ -1859,8 +1857,8 @@ mod tests {
                     note,
                     trigger,
                     observation_id: None,
-                },
-            )
+                }
+            })
     }
 
     fn hash_notification() -> impl Strategy<Value = crate::store::Notification> {

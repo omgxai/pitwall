@@ -1876,7 +1876,6 @@ fn main() -> ExitCode {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1931,7 +1930,13 @@ mod tests {
 
     #[test]
     fn malformed_session_exits_two() {
-        let bad = ["nope", "sess_", "sess_0123", "sess_0123456789ABCDEF", "0123"];
+        let bad = [
+            "nope",
+            "sess_",
+            "sess_0123",
+            "sess_0123456789ABCDEF",
+            "0123",
+        ];
         for entered in bad {
             let args = argv(&["--session", entered]);
             let refusal = chat_usage_check(&args, "").unwrap_err();

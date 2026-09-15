@@ -1873,7 +1873,16 @@ mod tests {
                     'R',
                     4200,
                 ),
-                raw_exe(200, 1, "bash", "/bin/bash", "bash", "/home/u/Shell", 'S', 1000),
+                raw_exe(
+                    200,
+                    1,
+                    "bash",
+                    "/bin/bash",
+                    "bash",
+                    "/home/u/Shell",
+                    'S',
+                    1000,
+                ),
                 raw_exe(400, 1, "term", "/usr/bin/term", "term", "/", 'S', 1000),
                 raw_exe(
                     401,

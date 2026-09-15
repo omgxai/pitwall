@@ -1420,14 +1420,7 @@ mod tests {
         "group",
     ];
 
-    const V3_PROJECT_KEYS: &[&str] = &[
-        "id",
-        "dir",
-        "name",
-        "is_git_repo",
-        "branch",
-        "git_clean",
-    ];
+    const V3_PROJECT_KEYS: &[&str] = &["id", "dir", "name", "is_git_repo", "branch", "git_clean"];
     const V3_AGENT_KEYS: &[&str] = &["kind", "confidence"];
     const V3_WINDOW_KEYS: &[&str] = &["address", "class", "title", "workspace"];
     const V3_LAST_ACTIVITY_KEYS: &[&str] = &["epoch", "kind"];
@@ -1450,8 +1443,14 @@ mod tests {
         "tier",
         "group",
     ];
-    const V3_SUMMARY_KEYS: &[&str] =
-        &["text", "model", "created_at", "input_hash", "status", "message"];
+    const V3_SUMMARY_KEYS: &[&str] = &[
+        "text",
+        "model",
+        "created_at",
+        "input_hash",
+        "status",
+        "message",
+    ];
     const V3_NOTIFICATION_KEYS: &[&str] = &[
         "id",
         "kind",
@@ -1597,8 +1596,8 @@ mod tests {
                             b'b' => out.push(0x08),
                             b'f' => out.push(0x0c),
                             b'u' => {
-                                let hex =
-                                    std::str::from_utf8(self.b.get(self.pos..self.pos + 4)?).ok()?;
+                                let hex = std::str::from_utf8(self.b.get(self.pos..self.pos + 4)?)
+                                    .ok()?;
                                 self.pos += 4;
                                 let cp = u32::from_str_radix(hex, 16).ok()?;
                                 let mut buf = [0u8; 4];
@@ -1699,7 +1698,10 @@ mod tests {
         let doc = Json::parse("{\"a\":[1,-2,null,true],\"b\":{\"c\":\"q\\\"\\\\\\u0007\"}}")
             .expect("parses");
         assert_eq!(doc.keys(), vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(doc.get("a").and_then(Json::as_arr).map(|a| a.len()), Some(4));
+        assert_eq!(
+            doc.get("a").and_then(Json::as_arr).map(|a| a.len()),
+            Some(4)
+        );
         let items = doc.get("a").and_then(Json::as_arr).expect("array");
         assert_eq!(items[1].as_i64(), Some(-2));
         assert!(matches!(items[2], Json::Null));
@@ -1709,10 +1711,18 @@ mod tests {
             Some("q\"\\\u{7}")
         );
         // Whatever `escape` emits, the extractor reads back verbatim.
-        for raw in ["plain", "q\"uote", "back\\slash", "tab\there", "nl\nhere", "café"] {
+        for raw in [
+            "plain",
+            "q\"uote",
+            "back\\slash",
+            "tab\there",
+            "nl\nhere",
+            "café",
+        ] {
             let json = format!("{{\"v\":\"{}\"}}", escape(raw));
             assert_eq!(
-                Json::parse(&json).and_then(|d| d.get("v").and_then(Json::as_str).map(str::to_string)),
+                Json::parse(&json)
+                    .and_then(|d| d.get("v").and_then(Json::as_str).map(str::to_string)),
                 Some(raw.to_string()),
                 "{json}"
             );
