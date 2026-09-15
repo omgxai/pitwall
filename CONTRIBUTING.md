@@ -1,41 +1,54 @@
 # Contributing to Pitwall
 
-Thanks for your interest. Pitwall is MIT-licensed and contributor-friendly.
+Thanks for your interest in Pitwall. 🏁
 
-## Ground rules
+Pitwall is an open-source project released under the MIT License, and contributions are welcome.
 
-1. **Small, verifiable milestones.** One phase at a time; every PR must state
-   what was tested.
-2. **Local-first, low weight.** No cloud deps, no telemetry, no heavy runtimes.
-   Justify any new dependency in the PR description.
-3. **Never commit secrets.** API keys, tokens, and keyrings are rejected by CI
-   scanning. Use env vars / OS keyring locally.
-4. **Omarchy-native UI.** Calm, fast, unobtrusive. No dashboard clutter.
+You don't need to be an expert in the codebase to help. Trying Pitwall, reporting a bug, improving the documentation, testing it on another Linux setup, or suggesting a better way to work with AI agents are all valuable contributions.
 
-## Workflow
+## Ways to contribute
 
-1. Fork, branch from `main` (`feat/<short-name>`).
-2. Keep commits small and conventional:
-   `feat: …`, `fix: …`, `docs: …`, `chore: …`.
-3. Before pushing:
-   ```bash
-   cargo fmt --check && cargo test && cargo clippy -- -D warnings
-   ```
-4. Update `.pitwall/STATE.md` if your change completes or moves a milestone.
-5. Open a PR using the template; link any related issue and ADR.
+There are many ways to help:
 
-## Reporting issues
+- 🐛 Report bugs and unexpected behaviour
+- 💡 Suggest features or improvements
+- 🖥️ Test Pitwall on different Linux environments
+- 🤖 Improve support for AI coding agents
+- 🎨 Improve the UI and user experience
+- ⚡ Improve performance and reliability
+- 🔒 Help improve privacy and security
+- 📚 Improve documentation and examples
+- 🧩 Build integrations and extensions
+- 📝 Share useful Pitwall workflows and recipes
+- 💻 Submit code and pull requests
 
-Use the bug report / feature request templates. Include: Omarchy version,
-`hyprctl version` output, `pitwall --version`, and steps to reproduce.
-Never paste secrets or API keys into issues.
+If you're not sure where to start, open an issue and tell us what you would like to improve.
 
-## Sharing workflows
+---
 
-Ran a good human+agent workflow with Pitwall? Write it up as a recipe —
-see `docs/RECIPES.md`. Recipes document practice, not theory: run it
-first, keep it small, name the human approval boundaries explicitly.
+## Before you start
 
-## Code of Conduct
+For larger changes, please open an issue or discussion first.
 
-By participating you agree to uphold [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+This gives us a chance to talk about the idea before you spend time implementing something that may not fit the direction of the project.
+
+Small fixes, documentation improvements and obvious bug fixes can usually go directly into a pull request.
+
+---
+
+## Development workflow
+
+### 1. Fork the repository
+
+Create your own fork of Pitwall and clone it locally.
+
+### 2. Create a branch
+
+Start from `main` and give your branch a short, descriptive name.
+
+For example:
+
+```text
+feat/better-agent-detection
+fix/session-status
+docs/installation-guide
