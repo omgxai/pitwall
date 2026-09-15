@@ -174,21 +174,29 @@ Pitwall currently targets Linux and is developed first for Omarchy.
     git clone https://github.com/omgxai/pitwall.git
     cd pitwall
 
-### 2. Install Pitwall
+### 2. Install Pitwall (recommended complete Omarchy setup)
 
-    ./packaging/install.sh
+    ./packaging/install.sh --enable-timer --enable-plugin
 
 The installer builds Pitwall and installs the Omarchy integration for your user account.
 
 No root installation is required.
 
-### 3. Enable the Pitwall plugin
+- `--enable-plugin` enables the Pitwall Omarchy bar widget and places it after `omarchy.agents`.
+- `--enable-timer` enables the background snapshot timer.
+- Plain `./packaging/install.sh` remains available as the "install files only" path; then enable manually (step 3) if needed.
+
+### 3. Enable the Pitwall plugin (fallback)
+
+If you installed files only, enable the widget with:
 
     omarchy plugin enable dev.pitwall --after omarchy.agents
 
 ### 4. Start workspace observation
 
     pitwall snapshot
+
+The first snapshot initializes current state immediately; otherwise the timer populates it on its normal interval.
 
 For continuous observation:
 
@@ -199,6 +207,10 @@ For continuous observation:
     pitwall doctor
 
 If everything is working, Pitwall should appear in your Omarchy environment.
+
+If the panel does not appear immediately because of shell/QML reload state, use:
+
+    omarchy restart shell
 
 ---
 

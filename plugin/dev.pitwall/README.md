@@ -132,7 +132,7 @@ at 16px via pixel dump (pure 2px cells, no blending).
 # install/edit loop (no root, no /usr/share changes)
 rm -rf ~/.config/omarchy/plugins/dev.pitwall
 cp -r plugin/dev.pitwall ~/.config/omarchy/plugins/dev.pitwall
-omarchy plugin enable dev.pitwall --section right   # first time only
+omarchy plugin enable dev.pitwall --after omarchy.agents   # first time only
 # shell hot-reloads on plugin change; watch for errors:
 journalctl --user -t omarchy-shell --since "1 minute ago" | grep -i pitwall
 # drive the panel without clicking:
