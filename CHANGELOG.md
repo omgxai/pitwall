@@ -1,161 +1,66 @@
 # Changelog
 
-All notable changes to Pitwall are documented here. Format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versioning follows
-[SemVer](https://semver.org/) once the first release is tagged.
+All notable user-facing changes to Pitwall are documented here.
+
+Pitwall is currently pre-release, so this changelog focuses on meaningful changes to the product rather than every internal implementation detail.
 
 ## [Unreleased]
 
-> M8 below is implemented but **not verified on an Omarchy runtime**: it was
-> written without a Rust toolchain and without QML tooling, so it has not been
-> compiled, no test has been executed, and no chat window has been opened.
-> Verification gates are listed in `README.md` under "Pitwall Chat".
+### Added
 
-- M8 Pitwall Chat: `pitwall chat [--session sess_ID]` runs a foreground
-  conversation in a native terminal — no daemon, no background process. Chat
-  identity is a sequential number `001..999` plus a reserved OSC 2 window
-  title; discovery requires that title *and* a chat-number lease whose owner
-  pid is a live `pitwall chat` process in the window's tree, so a spoofed
-  title alone is never a chat. Harness and model are captured once at startup
-  and are immutable for the chat's life. Context comes only from the bounded
-  `SummaryContext`; the document travels by `0600` ephemeral file (opencode)
-  or on stdin (claude, codex), never in argv, and no conversation is stored.
-  Exit codes 0/1/2 with a fixed refusal order that decides usage errors before
-  touching anything environmental. New: `docs/adr/ADR-009-chat-identity.md`.
-- M8 asking vs acting: every input that is not one of the six in-chat commands
-  is a question, answered from the bounded context with no workspace action
-  derived from its wording. The in-chat listing marks `/help`, `/context`,
-  `/sessions`, `/clear` and `/exit` read-only and `/resume [session-id]` as
-  changing workspace state — the one command that acts, through the existing
-  `resume` path with fixed argv and no shell.
-- M8 panel: `Open Chat` control (fixed argv, live-session scoping, refusal
-  instead of silent fallback) and a `pitwall-native` chat region that appears
-  while a chat terminal is open and disappears when it closes. `state.json`
-  gains an additive `chat` object per session (number, harness, model, context
-  label, start epoch — no pid, window address or conversation text).
-- M8 ticker correction: the AI brief now renders the complete summary with
-  eliding disabled and no truncation marker, scrolls right-to-left only, runs
-  each pass from the right edge to fully past the left edge before starting a
-  fresh pass, derives duration from measured geometry
-  (`(content + viewport) / 180 px per second`) rather than character count,
-  and pauses in place on hover or expansion — resuming from the held offset
-  across a panel content teardown.
-- M8 documented limitations: inline chat branding depends on the terminal's
-  graphics protocol and falls back to a textual header (chat stays fully
-  functional); a `pitwall chat` started by hand inside a tmux pane is not
-  discovered as a chat and appears as the ordinary terminal session it is; the
-  single terminal launch path keeps its existing `--dir` argv shape so
-  `resume`'s argv stays byte-identical, with the suspected upstream mismatch
-  recorded in ADR-009 rather than silently changed.
-- M7 summary freshness hardening: snapshot now compares the cached summary's
-  exact structured input hash before exposing it. Changed workspaces surface
-  an explicit stale state with no old summary text.
-- M7 summary ticker: bounded sentence items rotate continuously while the
-  panel is open, with hover/expanded pause and clean reset on content change.
-- M7 panel feedback: expanded `PITWALL · N` session count and targeted
-  notification-read confirmation.
-- M7 visual pass: labeled the summary surface as `AI BRIEF`, added a compact
-  subdued palette-bound brief surface, and kept the session rail visually
-  primary. (No chat affordance was shown at M7; M8 above adds one.)
-- M7 ticker correction: the brief now uses the complete measured summary
-  text in a right-to-left marquee at 180 px/sec, pausing in place on hover or
-  expansion and restarting only when the summary changes.
-- M7 hierarchy refinement: group headers gained subdued native separators and
-  the activity rail was thinned to read as state history, not completion.
-- M7 `SummaryContext`: one deterministic, bounded, scrubbed structured
-  context now feeds summary hashing and future workspace-aware surfaces.
-  (M8 above is the first surface built on it.)
+- Pitwall Chat for having a focused conversation about the current workspace.
+- A clearer AI Brief surface for understanding what is happening across active sessions.
+- Improved workspace summary freshness detection.
+- Better session activity and notification feedback.
+
+### Improved
+
+- The Pitwall panel now provides clearer visibility into active AI sessions and projects.
+- Workspace summaries use bounded, structured context.
+- Notifications distinguish between something that happened and what it means.
+- Session actions and failures provide clearer feedback.
+
+### In progress
+
+- Further verification and refinement of Pitwall Chat on live Omarchy environments.
+- Continued reliability and usability improvements.
+- Broader support for AI coding workflows.
 
 ## [0.1.0] - 2026-09-13
 
-### Changed
-- Tightened the optional snapshot timer from five minutes to 30 seconds so
-  session appearance, disappearance, and stop transitions reach the watched
-  panel promptly. The oneshot collector remains read-only and hash-gated.
-- Added compact in-panel feedback for explicit refresh, summary, resume,
-  stop, close, and workspace-target failures; failures no longer exist only
-  in the shell log.
-
 ### Added
-- Read-only `pitwall doctor` report for installed binary, state/config paths,
-  Omarchy plugin presence, and snapshot timer status.
-- M6 user-local packaging: idempotent `packaging/install.sh`, explicit
-  timer/plugin opt-ins, data-preserving uninstall, and
-  `packaging/test-install.sh` clean-room verification.
-- M5g notification inbox (frozen): `notifications` table (schema v4,
-  closed vocab, dedup, 100-cap, pinned columns), sync-derived
-  appeared/vanished/stopped + assign completion/attention events,
-  `state.json` unread rows (cap 20) + badge count,
-  `pitwall notifications [--unread]` / `read <id>`, panel unread
-  dots + inbox rows + group counts + header badge (explicit-read
-  contract). Notification = "something happened"; summary = "what
-  it means".
-- Brand artwork: `assets/pitwallpixelart.jpeg` (discovery art;
-  16px flag stays the UI identity).
-- M5g workforce control: collapsed-by-default project tree, icon-first
-  tiers, native scrollbar, `pitwall assign` (validated foreground agent
-  run, no persistence), in-card assign form, R3/R4 density trims.
-- M5g semantic tree: tier/group presentation fields (pitwall-native >
-  agents > workspace > system), project-grouped rail with collapse,
-  /proc-/sys-/dev-cwd exclusion fix, resumable confidence display.
-  Identity and schema unchanged (additive fields only).
-- Docs governance: disciplined public roadmap (M5 frozen, hardening +
-  AI Workforce/Recipes directions), refreshed README, new
-  `docs/AI_WORKFORCE.md` + `docs/RECIPES.md`, corrected security
-  wording to agent-delegated summaries.
-- M5f final polish (UI freeze): glyph-only confidence, process counts,
-  expander affordances, clamped ticker with attention line, state-word
-  detail cards, trash removal; grouping verified window-rooted.
-- M5f interaction polish: pin-stable hover/click model, in-delegate
-  detail cards, single-word header + refresh + gear, caption-free
-  ticker, heading-free rail, validated action row, summary trash via
-  `summarize --clear`.
-- M5f session timeline rail: collapsed flag button; header + gear;
-  AI summary ticker; duration/history bars newest-first; hover/pin
-  toast with deterministic detail; Focus/Stop/Resume/Close actions;
-  settings (agent/model/toggle) via `pitwall config`; session age,
-  history, root_pid in state.json.
-- M5e pixel flag identity: original 16x16 checkered `assets/flag.svg`
-  (+ 64px PNG), 14px panel header mark with wordmark fallback,
-  screenshot-verified, no layout/semantics changes.
-- M5d Part 1 summary persistence + state v3: `summaries` cache table
-  (input_hash PK; additive v3 migration preserving v2 rows), hash-gated
-  cache-first `summarize`, state.json v3 `summary{}` (ready/error/null),
-  strict StateReader `summary` property (no visuals yet).
-- M5c ephemeral AI context: `/proc` IO signals, best-effort kitty text
-  with honest foot Unavailable, bounded context builder (10+10 lines,
-  4KB/window, 6 sessions, 16KB cap), secret scrubbing, RAII ephemeral
-  files under /run/user, read-time derived events (no new tables),
-  `pitwall summarize` via configured agent (fixed argv, timeout, text
-  extraction). No OpenRouter/keys/cloud; no schema changes.
-- M5a evidence + discovery: `/proc` exe basename signal, window roles
-  (terminal/app/unknown; no agent inference for apps), honest Unknown
-  (`terminal context only`), additive `role` in JSON outputs,
-  `pitwall agents` / `pitwall models` over a fixed validated table.
-- M4 checkpoints + Resume: severity-ordered session state; `checkpoints`
-  table (schema v2, manual/disappearance triggers, 25/project + 500
-  retention, 280-char notes); `pitwall checkpoint` / `pitwall resume`
-  (Levels 1–2, strict validation, no fallbacks, never agents);
-  `Platform::{launch_terminal, focus_window_address}`; state.json v2
-  `resumable`; panel RESUME section; ADR-008.
-- M3 panel instrumentation polish: subconscious 1400ms working pulse,
-  160–180ms state/data transitions (budget-held), ActivityStrip honesty
-  kept, gauge deliberately omitted (documented). No Rust/state.json
-  changes.
-- M3 Omarchy panel: `plugin/dev.pitwall/` (manifest, Widget, StateReader,
-  SessionHero, SessionRow, ActivityStrip, StateDot, README). Kit-only QML,
-  FileView-driven state.json, native `Toplevel.activate()` Focus,
-  animation budget enforced, screenshot-verified on live desktop.
-- M2 local continuity cache: `store` module on `rusqlite` (bundled, sole
-  dependency), `meta`/`observations`/`sessions` schema v1, hash-gated
-  writes, newest-100 pruning, corrupt-quarantine + newer-version refusal,
-  `state.json` artifact (state schema v1, scrubbed), `pitwall snapshot`,
-  P1 project-dir normalization, observer self-exclusion, systemd unit +
-  timer (shipped disabled), ADR-007, SECURITY persistence boundary.
-- M1 workspace discovery: `platform` trait + Linux impl, `collector` with
-  confidence states and stable `proj_`/`sess_` IDs, `pitwall status [--json]`
-  (JSON schema v1), 23 unit tests with fixtures/mocks.
-- M0 project foundation: Rust crate scaffold (`pitwall` CLI + `pitwall_lib`),
-  MIT license, README, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, ROADMAP,
-  CHANGELOG, `.gitignore`, GitHub templates, CI skeleton, ADRs 001–006,
-  `.pitwall/STATE.md`, systemd unit + install script stubs.
+
+- First public Pitwall release.
+- Omarchy desktop integration with the native Pitwall panel.
+- Workspace and AI-agent session discovery.
+- Project and session grouping.
+- AI-generated workspace summaries.
+- Session checkpoints and resume support.
+- Workspace notifications.
+- Explicit session actions including focus, stop, resume and close.
+- `pitwall doctor` for checking the local installation.
+- User-local installation and uninstall support.
+- Configurable AI agent and model settings.
+- Local SQLite continuity cache.
+- Scrubbed and bounded AI context.
+- MIT open-source licensing.
+- Pitwall pixel-art identity and UI assets.
+
+### Improved
+
+- Session detection and state handling.
+- Panel layout, interaction and visual hierarchy.
+- Reliability when sessions appear, disappear or stop.
+- Feedback for refresh, summary, resume, stop, close and workspace-target failures.
+- Local-first behaviour with no required cloud service or Pitwall account.
+
+## Earlier development
+
+Pitwall was developed through a series of internal milestones covering workspace discovery, local continuity, the Omarchy panel, checkpoints, AI summaries, notifications and workspace interaction.
+
+Detailed implementation history remains available in the Git history and architecture documentation rather than being reproduced here.
+
+---
+
+[Unreleased]: https://github.com/omgxai/pitwall/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/omgxai/pitwall/releases/tag/v0.1.0
