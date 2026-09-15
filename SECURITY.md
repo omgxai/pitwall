@@ -1,89 +1,108 @@
 # Security Policy
 
+Pitwall is a local-first open-source project, and security and privacy are important because Pitwall observes activity in a developer's workspace.
+
 ## Supported versions
 
-Pitwall is pre-release (v0.x). Security fixes target the latest `main`
-until the first tagged release; a version table will be published at v0.1.0.
+Pitwall is currently pre-release (`v0.x`).
 
-## Report a vulnerability
+Until the first stable release, security fixes are focused on the latest `main` branch. A supported-version policy will be published with the first stable release.
 
-- **Do not open a public issue for a suspected vulnerability.**
-- Report privately to the maintainer contact published with the public
-  repository (to be added before first public push).
-- Include: affected version/commit, reproduction steps, impact assessment.
-- Expect acknowledgement within 72 hours and a remediation plan within 7 days.
+## Reporting a vulnerability
 
-## Security principles (architectural, non-negotiable)
+**Please do not open a public GitHub issue for a suspected security vulnerability.**
 
-1. **Local-first.** Workspace data stays on-device in SQLite. No cloud
-   backend, no telemetry, no mandatory accounts.
-2. **Secrets never travel.** API keys and tokens are never committed, logged,
-   embedded in prompts, or exposed through summaries or UI output.
-3. **Minimal delegated context.** The optional AI summary is produced by
-   the user's own configured agent (never a Pitwall provider key) from a
-   small sanitized context — project/branch/state labels, never file
-   contents or credentials.
-4. **Human approval is the security boundary.** Agents may request; only the
-   human approves (future approval layer). No autonomous privileged actions.
-5. **Safe action layer.** MVP actions are limited to focusing/opening
-   terminals and projects.
+If GitHub private vulnerability reporting is enabled for this repository, use:
 
-## Secret hygiene for contributors
+**GitHub → Security → Advisories → Report a vulnerability**
 
-- Store local keys in env vars or the OS keyring, never in files or shell
-  history shared with the repo.
-- CI includes a secret-scan step (gitleaks-style pattern check) that fails
-  the build on suspected committed credentials.
+This keeps the report private while the issue is investigated.
 
-## Persistence boundary (M2, binding)
+If private vulnerability reporting is not available, please contact the project maintainer through the contact information on the maintainer's GitHub profile and do not disclose the vulnerability publicly.
 
-Pitwall observes full process command lines in memory to classify agents
-(`status --json` may show them ephemerally for local debugging). The
-following MUST NOT enter SQLite history or `state.json`:
+When reporting a vulnerability, please include:
 
-- full argv / command-line strings (only the process **name** is persisted)
-- agent evidence strings containing command text (evidence stays in the
-  live CLI output only)
-- environment variables (never read, never stored)
-- API keys, tokens, passwords, secrets of any kind
-- command history or terminal output
+- the affected version or commit
+- steps to reproduce the issue
+- the expected and observed behaviour
+- the potential security or privacy impact
+- any useful logs or proof of concept
 
-Persisted per session (only): project id/dir/name, git repo state
-(is_repo/branch/clean), session id, agent kind + confidence, aggregate
-state, process count, activity epoch, window address/class/title/workspace,
-collection time, hostname. Per process: name, state, start time, cwd.
+Please remove passwords, API keys, tokens and other sensitive information before submitting a report.
 
-Enforcement: unit tests assert secret-bearing fixtures never reach database
-bytes (`full_cmdline_never_reaches_sqlite`) or the state artifact
-(`state_artifact_is_separate_versioned_and_scrubbed`). CI secret-scan
-covers the repository itself.
+We aim to acknowledge valid reports within 72 hours and provide an initial remediation plan within 7 days.
 
-## M4 action boundary
+## Security principles
 
-Resume executes only two fixed-form operations, both user-initiated:
+Pitwall is designed around the following principles.
 
-- Level 1 — focus a live window by validated `0x…` address (native
-  compositor activation; CLI equivalent uses the first-party Lua dispatch
-  shape with argv passing, never a shell).
-- Level 2 — open one terminal at a validated absolute existing directory
-  (`xdg-terminal-exec --dir`, fixed argv, no shell, no interpolation).
+### Local-first
 
-Refusals (malformed id, unknown session, missing/non-dir path, launch
-failure) exit non-zero with a reason and never fall back to another
-target. There is no agent-start path and no arbitrary-command path;
-checkpoint notes are length-capped labels, never interpreted.
+Workspace data is kept on the user's machine.
 
-## M5c ephemeral terminal context
+Pitwall does not require a cloud backend, mandatory account or telemetry service.
 
-Terminal first/last lines sampled for AI summaries are EPHEMERAL, never
-history: they exist only inside one bounded JSON document under
-`/run/user/$UID/pitwall/` (0700 dir, O_EXCL 0600 unpredictable file),
-are scrubbed before writing (secret-shape matrix incl. PEM/Bearer/bare
-forms; structural bans on env/argv/transcripts hold first), travel to
-the agent only via `-f` file attachment (never argv, never shell), and
-are unlinked on every exit path (explicit close + Drop guard; tmpfs
-backing). SQLite/state.json/logs never receive terminal text (only the
-returned interpretation may later be cached per M5 design, never the
-evidence). The agent is invoked with fixed argv and a static
-interpret-only instruction; tool-call payloads in its output are
-ignored, never chained.
+### Secrets stay private
+
+Pitwall should never intentionally persist or expose:
+
+- API keys
+- access tokens
+- passwords
+- private keys
+- environment variables
+- command history
+- terminal transcripts
+- other credentials or secrets
+
+Contributors must never commit secrets to the repository.
+
+### Minimal AI context
+
+AI features are optional.
+
+When Pitwall creates an AI summary, it uses a bounded and sanitized representation of workspace state rather than sending the entire workspace to an AI provider.
+
+Pitwall does not require a Pitwall-owned AI provider key.
+
+### Human control
+
+Pitwall is intended to help people understand and manage AI-assisted development, not silently take control of their computer.
+
+Actions that affect the workspace should be explicit and constrained.
+
+### Safe execution
+
+Operations that interact with the user's desktop or workspace should use validated inputs and fixed execution paths rather than arbitrary shell commands.
+
+Unexpected or invalid targets should fail safely rather than silently falling back to another target.
+
+## Contributor security
+
+Please:
+
+- keep credentials out of source code and configuration files
+- use environment variables or the operating system's credential store for local development
+- never include secrets in issues, pull requests or documentation
+- check logs and screenshots for sensitive information before sharing them
+- report security-sensitive bugs privately
+
+CI includes automated checks intended to catch accidentally committed credentials, but contributors are responsible for checking their own changes as well.
+
+## Privacy boundary
+
+Pitwall may temporarily inspect information from running processes and desktop windows in order to understand the current workspace.
+
+This information is intentionally bounded.
+
+Persistent workspace state should contain only the information needed to identify and describe sessions and projects. Full command lines, credentials, environment variables and terminal transcripts should not become part of persistent history.
+
+Temporary data used for AI interpretation should be bounded, scrubbed and removed when it is no longer needed.
+
+## Security changes
+
+Security-related changes should include appropriate tests and documentation.
+
+If a change affects what Pitwall observes, stores, sends to an AI agent, or can do to the user's workspace, the security and privacy implications should be considered as part of the change.
+
+For more information about contributing, see [CONTRIBUTING.md](CONTRIBUTING.md).
